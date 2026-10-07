@@ -14,6 +14,11 @@ def _setup_logging(verbose: bool) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
+def rules_intent(text: str) -> bool:
+    from . import rules
+    return rules.parse_intent(text) is not None
+
+
 def print_query_result(res: dict) -> None:
     if res.get("interpreted"):
         print(f"Interpreted as: {res['interpreted']}\n")
@@ -210,6 +215,290 @@ def run_rule(a, stdin=None) -> None:
             print(f"rule {rid} deleted" if rules.delete(conn, rid, actor="cli") else "already deleted")
 
 
+def print_boards(boards: list[dict], per_board: int = 25) -> None:
+    from . import trackers
+    if not boards:
+        print('no trackers yet - try:  emaild tracker add "Track my Acme Shop orders"')
+    for b in boards:
+        t = b["tracker"]
+        print(f"[{t['id']}] {b['icon']} {t['name']}  ({t['kind']}, {trackers.status_text(t)}, v{t['version']})")
+        for it in b["open"][:per_board]:
+            extra = "".join(f"  {x}" for x in (it.get("when"), f"! {it['stalled']}" if it.get("stalled") else None,
+                                               f"(email {it['email_id']})" if it.get("email_id") else None) if x)
+            print(f"     {it['label']:<17} {(it.get('title') or '')[:60]}{extra}")
+        if not b["open"]:
+            print("     (nothing on the board yet)" if t["status"] == "active" else "     (not running)")
+        if b["closed"]:
+            print(f"     + {len(b['closed'])} finished")
+
+
+def print_tracker(t: dict, dry: dict | None = None) -> None:
+    from . import trackers
+    print(f"[{t['id']}] {t.get('name') or ''}  ({t.get('kind')}, {trackers.status_text(t)}, v{t.get('version', 1)})")
+    print(f"     {t.get('readback') or ''}")
+    for w in t.get("warnings") or []:
+        print(f"     ! {w}")
+    if dry:
+        print(f"     {dry['summary']}")
+        for e in dry.get("examples") or []:
+            print(f"       · {e['title'][:70]}: {e['state'].replace('_', ' ')}")
+
+
+def print_tracker_status(ans: dict) -> None:
+    print(ans["title"])
+    for line in ans["lines"]:
+        print(f"  • {line}")
+    if ans.get("hint"):
+        print(f'  try:  emaild tracker add "{ans["hint"]}"')
+
+
+def run_tracker(a, stdin=None) -> None:
+    """`emaild tracker add|show|off|on|rm|test|edit|confirm|suggest ...` and `emaild trackers` (boards)."""
+    from . import db, trackers, users
+    from .llm.router import Router
+    stdin = stdin or sys.stdin
+    ctx = users.resolve()
+    args = list(a.args or [])
+    with db.user_session(ctx) as conn:
+        if a.op == "list":
+            print_boards(trackers.boards(conn))
+            n = trackers.count_suggestions(conn)
+            if n:
+                print(f"\n{n} suggested tracker{'s' if n != 1 else ''}:  emaild tracker suggest")
+            return
+        if a.op in ("add", "edit"):
+            ref = args.pop(0) if a.op == "edit" and args else None
+            text = " ".join(args).strip()
+            if not text:
+                print('say what to track:  emaild tracker add "Track my Acme Shop orders"')
+                return
+            router = Router()
+            if a.op == "edit":
+                old = trackers.find_tracker(conn, ref)
+                t = trackers.edit(conn, old["id"], text, router, actor="cli") if old else {"error": f"no tracker {ref!r}"}
+            else:
+                t = trackers.create(conn, text, router, actor="cli")
+            if t.get("error"):
+                print(t["error"])
+                return
+            print_tracker(t, trackers.dry_run_safe(conn, t, router))
+            if a.yes:
+                ok = True
+            elif stdin.isatty():
+                ok = input("Save this tracker? [y/N] ").strip().lower() in ("y", "yes")
+            else:
+                print(f"left pending (no terminal to ask). Turn it on with:  emaild tracker on {t['id']}")
+                return
+            if ok:
+                trackers.confirm(conn, t["id"], actor="cli")
+                print(f"tracker {t['id']} is on; its board fills in over the next worker cycles")
+            elif t.get("version", 1) == 1:
+                trackers.delete(conn, t["id"], actor="cli")
+                print("discarded")
+            return
+        if a.op == "test":
+            res = trackers.dry_run_ref(conn, " ".join(args), router=Router(), days=a.days or trackers.DRY_DAYS)
+            if res.get("error"):
+                print(res["error"])
+                return
+            t = res["tracker"]
+            print(f"[{t['id']}] {t.get('name') or ''}" if t.get("id") else f"(new, not saved) {t.get('name') or ''}")
+            print(f"     {t.get('readback') or ''}")
+            print(f"     {res['dry_run']['summary']}")
+            return
+        if a.op == "suggest":
+            if a.accept is not None:
+                res = trackers.accept_suggestion(conn, a.accept, actor="cli")
+                print(res["error"] if res.get("error") else f"tracking as {res['tracker']['id']}: "
+                                                              f"{res['tracker'].get('readback') or ''}")
+                return
+            if a.dismiss is not None:
+                print("dismissed - it won't be suggested again" if trackers.dismiss_suggestion(conn, a.dismiss,
+                                                                                                actor="cli")
+                      else f"no open suggestion {a.dismiss}")
+                return
+            rows = trackers.list_suggestions(conn, key=ctx.user_id)
+            if not rows:
+                print("no tracker suggestions right now")
+            for sg in rows:
+                print(f"[{sg['id']}] {sg['label']}: “{sg['text']}”\n     {sg['readback']}\n     why: {sg['evidence']}")
+            if rows:
+                print("track one:  emaild tracker suggest --accept N    never again:  emaild tracker suggest --dismiss N")
+            return
+        t = trackers.find_tracker(conn, " ".join(args)) if args else None
+        if t is None:
+            print(f"no tracker matches {' '.join(args)!r} (see 'emaild trackers')" if args else
+                  "give a tracker id (from 'emaild trackers') or a few words from it")
+            return
+        tid = t["id"]
+        if a.op == "show":
+            b = trackers.board(conn, tid)
+            print_boards([b] if b else [], per_board=200)
+            print(f"     {t['readback']}\n     your words: {t['original_text']}")
+            for it in (b or {}).get("closed") or []:
+                print(f"     finished {it['closed_at'][:10]}  {it['label']:<14} {it.get('title') or ''}")
+        elif a.op in ("on", "confirm"):
+            ok = trackers.confirm(conn, tid, actor="cli")["active"] if t["status"] == "pending" else \
+                trackers.set_enabled(conn, tid, True, actor="cli")
+            print(f"tracker {tid} is on" if ok else f"tracker {tid} is {trackers.status_text(t)}")
+        elif a.op == "off":
+            print(f"tracker {tid} is paused" if trackers.set_enabled(conn, tid, False, actor="cli")
+                  else f"tracker {tid} is {trackers.status_text(t)}")
+        elif a.op == "rm":
+            print(f"tracker {tid} deleted" if trackers.delete(conn, tid, actor="cli") else "already deleted")
+
+
+def print_projects(rows: list[dict]) -> None:
+    from . import projects
+    if not rows:
+        print('no projects yet - try:  emaild project add "Create a project for the NSFC committee, everything from '
+              'nsfc.example.org"')
+    for top in rows:
+        icon = "🗂" if top["kind"] == "umbrella" else "📁"
+        print(f"[{top['id']}] {icon} {top['name']}  ({top['kind']}, {projects.status_text(top)})  {top['line']}")
+        for k in top["children"]:
+            print(f"     [{k['id']}] 📁 {k['name']}  ({projects.status_text(k)})  {k['line']}")
+
+
+def print_project(p: dict, dry: dict | None = None) -> None:
+    from . import projects
+    under = f", under {p['parent_name']}" if p.get("parent_name") else ""
+    print(f"[{p['id']}] {p.get('name') or ''}  ({p.get('kind')}{under}, {projects.status_text(p)})")
+    print(f"     {p.get('readback') or ''}")
+    for w in p.get("warnings") or []:
+        print(f"     ! {w}")
+    if dry and dry.get("summary"):
+        print(f"     {dry['summary']}")
+        for e in (dry.get("examples") or [])[:3]:
+            print(f"       · {e['date']}  {e['sender']} — {e['subject']}")
+
+
+def run_project(a, stdin=None) -> None:
+    """`emaild project add|show|status|link|unlink|done|archive|on|rm|move|confirm|facts|suggest ...` and
+    `emaild projects`."""
+    from . import db, projects, users
+    from .llm.router import Router
+    stdin = stdin or sys.stdin
+    ctx = users.resolve()
+    args = list(a.args or [])
+    with db.user_session(ctx) as conn:
+        if a.op == "list":
+            print_projects(projects.overview_rows(conn))
+            sugg = projects.list_suggestions(conn)
+            if sugg:
+                print(f"\n{len(sugg)} suggested sub-project{'s' if len(sugg) != 1 else ''}:  emaild project suggest")
+            return
+        if a.op == "add":
+            text = " ".join(args).strip()
+            if not text and a.item is None:
+                print('say what the project is:  emaild project add "Add a sub-project under NSFC: presentation night"')
+                return
+            router = Router()
+            p = projects.create(conn, text, router, actor="cli", parent=a.under, item_id=a.item)
+            if p.get("error"):
+                print(p["error"])
+                return
+            print_project(p, projects.dry_run_safe(conn, p, router))
+            if a.yes:
+                ok = True
+            elif stdin.isatty():
+                ok = input("Save this project? [y/N] ").strip().lower() in ("y", "yes")
+            else:
+                print(f"left pending (no terminal to ask). Save it with:  emaild project confirm {p['id']}")
+                return
+            if ok:
+                res = projects.confirm(conn, p["id"], actor="cli")
+                extra = f"; {res['linked']} emails from the thread filed" if res.get("linked") else ""
+                print(f"project {p['id']} is on{extra}; matching emails from the last {projects.WINDOW_DAYS} days are "
+                      f"filed over the next worker cycles")
+            else:
+                projects.delete(conn, p["id"], actor="cli")
+                print("discarded")
+            return
+        if a.op == "suggest":
+            if a.accept is not None:
+                res = projects.accept_suggestion(conn, a.accept, actor="cli")
+                print(res["error"] if res.get("error") else f"created sub-project {res['project']['id']}: "
+                                                              f"{res['project']['name']}")
+                return
+            if a.dismiss is not None:
+                print("dismissed - it won't be suggested again" if projects.dismiss_suggestion(conn, a.dismiss, "cli")
+                      else f"no open suggestion {a.dismiss}")
+                return
+            rows = projects.list_suggestions(conn)
+            for sg in rows:
+                print(f"[{sg['id']}] {sg['parent']} / {sg['name']}  — {sg['evidence']}")
+            print("create one:  emaild project suggest --accept N    never again:  emaild project suggest --dismiss N"
+                  if rows else "no suggested sub-projects right now")
+            return
+        if a.op in ("link", "unlink"):
+            if len(args) < 2 or not args[0].isdigit():
+                print(f"use:  emaild project {a.op} <email id> <project>")
+                return
+            if a.op == "link":
+                res = projects.link(conn, int(args[0]), " ".join(args[1:]), actor="cli")
+                print(res["error"] if res.get("error") else
+                      f"email {res['item_id']} filed under {res['project']}" + ("" if res["linked"] else
+                                                                                " (it already was)"))
+            else:
+                print("unlinked" if projects.unlink(conn, int(args[0]), " ".join(args[1:]), actor="cli")
+                      else "it wasn't filed there")
+            return
+        p = projects.find_project(conn, " ".join(args)) if args else None
+        if p is None:
+            print(f"no project matches {' '.join(args)!r} (see 'emaild projects')" if args else
+                  "give a project id (from 'emaild projects') or its name")
+            return
+        pid = p["id"]
+        if a.op in ("status", "show"):
+            st = projects.project_status(conn, p, Router() if a.op == "status" else None,
+                                         with_overview=a.op == "status")
+            for line in projects.status_lines(st):
+                print(line)
+            if a.op == "show":
+                print(f"     {p['readback']}\n     your words: {p['original_text']}")
+                for e in st["timeline"][:10]:
+                    print(f"     {e['at'][:16]}  {e['kind']:<8} {e['text'][:90]}")
+        elif a.op == "facts":
+            res = projects.facts(conn, pid, a.type, a.status)
+            for f in res["facts"]:
+                due = f"  due {f['due']}" if f["due"] else ""
+                print(f"  [{f['id']}] {f['type']:<13} {f['status']:<10} {f['project'][:20]:<20} {f['text'][:80]}{due}"
+                      f"  (email {f['item_id']})")
+            if not res["facts"]:
+                print("no facts")
+        elif a.op == "confirm":
+            res = projects.confirm(conn, pid, actor="cli")
+            print(f"project {pid} is on" if res["active"] else f"project {pid} is {projects.status_text(p)}")
+        elif a.op in ("done", "archive", "on"):
+            st = {"done": "done", "archive": "archived", "on": "active"}[a.op]
+            print(f"project {pid} is {st}" if projects.set_status(conn, pid, st, actor="cli")
+                  else f"project {pid} is {projects.status_text(p)}")
+        elif a.op == "rm":
+            print(f"project {pid} deleted" if projects.delete(conn, pid, actor="cli") else "already deleted")
+        elif a.op == "move":
+            if a.under is None and not a.top:
+                print("say where:  emaild project move <project> --under <parent>   (or --top)")
+                return
+            res = projects.move(conn, pid, None if a.top else a.under, actor="cli")
+            print(res["error"] if res.get("error") else
+                  f"project {pid} is now " + (f"under {res['parent_name']}" if res.get("parent_name") else "top-level"))
+
+
+def run_thread_status(a) -> None:
+    from . import db, projects, users
+    from .llm.router import Router
+    ref = " ".join(a.ref or []).strip()
+    with db.user_session(users.resolve()) as conn:
+        ts = projects.thread_status(conn, int(ref) if ref.isdigit() else None, None if ref.isdigit() else ref,
+                                    Router())
+    if ts.get("error"):
+        print(ts["error"])
+        return
+    for line in projects.thread_lines(ts):
+        print(line)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="emaild")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -288,6 +577,34 @@ def main(argv: list[str] | None = None) -> None:
     ru.add_argument("--dismiss", type=int, help="with suggest: never suggest N again")
     rs = sub.add_parser("rules", help="list your rules")
     rs.add_argument("--all", action="store_true", help="include deleted rules")
+    tk = sub.add_parser("tracker", help='trackers in plain words: add "<text>" [--yes] | show <id|words> | off <id> | '
+                                         'on <id> | rm <id> | test <id|"new tracker"> | edit <id> "<text>" | '
+                                         'suggest [--accept N | --dismiss N]')
+    tk.add_argument("op", choices=["add", "show", "off", "on", "rm", "test", "edit", "confirm", "suggest", "list"])
+    tk.add_argument("args", nargs="*", help="tracker text, or a tracker id (or a few words from it)")
+    tk.add_argument("--yes", action="store_true", help="save without asking")
+    tk.add_argument("--days", type=int, default=None, help="with test: look back this many days (default 90)")
+    tk.add_argument("--accept", type=int, help="with suggest: track suggestion N")
+    tk.add_argument("--dismiss", type=int, help="with suggest: never suggest N again")
+    sub.add_parser("trackers", help="your trackers' boards")
+    pj = sub.add_parser("project", help='projects in plain words: add "<text>" [--yes] [--under P] [--item N] | '
+                                        'show|status <project> | link|unlink <email id> <project> | '
+                                        'done|archive|on|rm <project> | move <project> --under <parent> | '
+                                        'confirm <project> | facts <project> | suggest [--accept N | --dismiss N]')
+    pj.add_argument("op", choices=["add", "show", "status", "link", "unlink", "done", "archive", "on", "rm", "move",
+                                   "confirm", "facts", "suggest", "list"])
+    pj.add_argument("args", nargs="*", help="project text, or a project id / name")
+    pj.add_argument("--yes", action="store_true", help="save without asking")
+    pj.add_argument("--under", default=None, help="parent project (add, move)")
+    pj.add_argument("--top", action="store_true", help="with move: make it top-level")
+    pj.add_argument("--item", type=int, default=None, help="with add: start it from this email's thread")
+    pj.add_argument("--type", default=None, help="with facts: decision|ask|commitment|deadline|open_question|info")
+    pj.add_argument("--status", default="open", help="with facts: open|done|superseded|all")
+    pj.add_argument("--accept", type=int, help="with suggest: create suggested sub-project N")
+    pj.add_argument("--dismiss", type=int, help="with suggest: never suggest N again")
+    sub.add_parser("projects", help="your projects and sub-projects")
+    ts = sub.add_parser("thread-status", help='where a thread stands: thread-status <email id | "words">')
+    ts.add_argument("ref", nargs="+")
     bm = sub.add_parser("benchmark", help="re-classify reviewed emails and score agreement with your verdicts")
     bm.add_argument("--model", help="Ollama model to test (default: EMAILD_TRIAGE_MODEL or EMAILD_LLM_MODEL)")
     bm.add_argument("--limit", type=int, default=50, help="most recent reviewed emails to test")
@@ -346,7 +663,38 @@ def main(argv: list[str] | None = None) -> None:
                     from .ask import ask
                     res = {"mode": "answer", **ask(conn, a.question, Router())}
                 else:
-                    from . import query
+                    from . import query, trackers
+                    intent = trackers.parse_intent(a.question)
+                    if intent and intent["op"] == "status":
+                        ans = trackers.status_answer(conn, intent["kind"])
+                        if not ans.get("hint"):       # tracking that kind: answer from the boards
+                            print_tracker_status(ans)
+                            return
+                    elif intent and intent["op"] == "list":
+                        print_boards(trackers.boards(conn))
+                        return
+                    elif intent:
+                        print(f'that reads as a new tracker; add it with:  emaild tracker add "{intent["text"]}"')
+                        return
+                    from . import projects
+                    pi = None if rules_intent(a.question) else projects.parse_intent(a.question)
+                    res = projects.route_status(conn, pi["ref"], Router()) if pi and pi["op"] == "status" else {}
+                    if res.get("unavailable"):
+                        pi = None                         # before migration 015: a normal question, as before
+                    if pi and pi["op"] == "status":
+                        if res.get("error"):
+                            print(res["error"])
+                        else:
+                            lines = (projects.status_lines(res["status"]) if res["kind"] == "project"
+                                     else projects.thread_lines(res["status"]))
+                            print("\n".join(lines))
+                        return
+                    if pi and pi["op"] == "list":
+                        print_projects(projects.overview_rows(conn))
+                        return
+                    if pi:
+                        print(f'that reads as a new project; add it with:  emaild project add "{pi["text"]}"')
+                        return
                     res = query.run(conn, a.question, Router())
                 print_query_result(res)
             else:
@@ -414,6 +762,18 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "rules":
         a.op, a.args, a.yes, a.days = "list", [], False, None
         run_rule(a)
+    elif a.cmd == "tracker":
+        run_tracker(a)
+    elif a.cmd == "trackers":
+        a.op, a.args, a.yes, a.days, a.accept, a.dismiss = "list", [], False, None, None, None
+        run_tracker(a)
+    elif a.cmd == "project":
+        run_project(a)
+    elif a.cmd == "projects":
+        a.op, a.args = "list", []
+        run_project(a)
+    elif a.cmd == "thread-status":
+        run_thread_status(a)
     elif a.cmd in ("needs", "seen"):
         from . import brief as brief_mod, db, users
         ctx = users.resolve()

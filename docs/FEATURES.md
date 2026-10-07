@@ -4,13 +4,24 @@ This is the backlog of features beyond the phased roadmap in the design spec. Ea
 
 | # | Feature | Status | Fits after |
 |---|---|---|---|
-| F1 | Service status monitoring | Proposed (2026-10-06); now the first tracker type in F5 | Phase 2 (rules) |
+| F1 | Service status monitoring | Built (2026-10-07) as the `service` tracker kind in F5 | Phase 2 (rules) |
 | F2 | Delete expired one-time codes / sign-in links in Gmail | Proposed (2026-10-07) | Phase 4 (write access) |
 | F3 | Protected identities: web page + suggestions | Proposed (2026-10-07) | Phase 2 |
 | F4 | One command surface: CLI, MCP and Telegram parity | In progress (2026-10-07) | ongoing |
-| F5 | Trackers: status boards configured in plain language (orders, services, ticket releases…) | Proposed (2026-10-07); builds on rules (slices 1–2 done) | Phase 2 (rules) |
+| F5 | Trackers: status boards configured in plain language (orders, services, ticket releases…) | Built (2026-10-07): orders, service, on-sale and custom kinds on every surface | Phase 2 (rules) |
 | F6 | Generic IMAP connector (app passwords: iCloud, Fastmail, ISP mailboxes) | Possible later addition | after Phase 5 |
 | F7 | Draft emails (never sent): emAIl writes, you send from your own mail app | Proposed (2026-10-07) | Phase 6 (drafts) |
+| F8 | Deterministic-first triage: a fast, explainable classifier ahead of the LLM (plus an honest benchmark) | Proposed (2026-10-07), not started | before Phase 4 (earned autonomy) |
+
+**Phase 3, slice 1 — Projects core with sub-projects (2026-10-07): built.** `src/emaild/projects.py`, migration 015, setup in [SETUP.md §14](SETUP.md#14-projects-phase-3-slice-1). What shipped:
+- **Hierarchy.** Every project has at most one parent. *Umbrellas* are ongoing involvements that never finish (a club committee, the household), usually with a broad match (everyone at a domain); *sub-projects* are goals with an end ("Presentation night", "Uniform order") inside the umbrella's mail. Depth > 2 is allowed in the data; the UI shows two levels. `project_related` links the rare cross-umbrella relationship (never a second parent). Deleting a project moves its sub-projects up a level.
+- **Filing, two steps, after triage and trackers** (spam, phishing, one-time codes, security-held mail and duplicates are never filed or read). (1) Deterministic: thread stickiness (a thread already filed keeps new messages, including your replies, without a model call), a rule's `project:` action (strongest signal; with a topic Gemma checks the topic first), a sub-project's own match, or the umbrella's match (the rules matcher, reused). (2) Gemma picks which of *that* umbrella's open sub-projects the email is about — a closed set: an id, "none" (it stays as the umbrella's general business) or "new" (stored as a suggested sub-project, never created automatically). Each email is considered once per umbrella (`project_processed`).
+- **Facts.** One narrow, schema-bound call per filed email: decision, ask (of you), commitment (with owner), deadline (needs a date), open question, info — each citing its email, with owner, due date and confidence, validated in Python. Near-identical facts within a project are dropped; a later email can resolve an open ask / question / commitment / deadline (the model picks from a short list of ids). Facts belong to the sub-project and roll up into the umbrella.
+- **Bounded.** Deterministic linking is unbounded across cycles; model calls (sub-project choice, rule topics, facts) share 30 per user per worker cycle, with a third kept for facts while some wait. A new project files the last 90 days in the background; facts from emails older than 48 hours are *backfill* and never show as new in the brief.
+- **Status on demand.** Built from facts, the timeline and thread state (who wrote last → who's waiting on whom, for conversations you took part in). Umbrella: a one-liner per sub-project, general business, upcoming dates across all of them. Sub-project: open facts by type. An optional 2–3 sentence overview is written by Gemma **from the facts only**. `thread_status` does the same for any thread (in a project or not): long threads are read in stages (≤ 5 calls), every entry cites its email.
+- **Creating in plain words** (compile → read-back → 90-day dry run → Save, like rules and trackers): from a description, from a sender/domain, as a sub-project, or from a thread ("make this thread a sub-project of NSFC" via the item page, MCP `item_id` or CLI `--item`). Deterministic parser for the common shapes.
+- **Rules integration.** Rules gain an optional `project:` action ("anything from Riverside Rovers about the canteen goes under the club's Canteen sub-project"), validated, read back and resolved to the project's id at compile time. Rules without it compile exactly as before; a rule whose only effect is filing never changes triage.
+- **Next (slice 2):** the linked Obsidian note per project (`obsidian_path` is reserved).
 
 **Phase 5, Outlook.com (2026-10-07): delivered** through Microsoft Graph (`src/emaild/channels/outlook.py`). Read-only `Mail.Read` over OAuth (auth code + PKCE, `consumers` authority). It uses per-folder delta sync for Inbox, Sent, Junk and Archive, and fetches raw MIME through the same parser as Gmail. Outlook state is mapped onto the Gmail label names, so triage, search and briefs work unchanged. Setup is in `docs/SETUP.md` (5b). A generic IMAP connector (F6) could later cover providers that still allow app passwords (iCloud, Fastmail, many ISPs). Outlook.com can't use it because Microsoft turned off basic auth there in September 2024.
 
@@ -18,7 +29,7 @@ This is the backlog of features beyond the phased roadmap in the design spec. Ea
 
 ## F1. Service status monitoring
 
-*Generalised by [F5](#f5-trackers-status-boards-configured-in-plain-language): service status is one tracker type among several.*
+*Built as part of [F5](#f5-trackers-status-boards-configured-in-plain-language) (2026-10-07): service status is the `service` tracker kind. "Track Example VPN status" gives a board per service/component with alerts on change only, a "recovered" note, last-heard times and optional silence warnings ("it reports daily"). The design below is kept for reference; the data lives in the shared tracker tables rather than `service_sources` / `service_events`, and the MCP tools are `trackers()` / `tracker_items()` rather than `service_status()`.*
 
 **What:** some services send regular emails about their own state. Twingate is the first example: connector up or down, an update available. emAIl should turn those emails into a **live status board** rather than an inbox. You see the *current state* of each service, and you're only told when it changes.
 
@@ -82,6 +93,12 @@ Every operation should be available wherever you are: in a terminal, in an MCP c
 | Rules in plain language (Phase 2, slice 1; web: Rules page) | ✅ `rule add/edit/off/on/rm/show/confirm/apply`, `rules` | ✅ create_rule, confirm_rule, list_rules, show_rule, update_rule, set_rule_enabled, delete_rule; explain lists the rules that fired | ✅ /rule (✅ Save / ✖ Cancel), /rules, /rule off·on·rm·show·edit, free text ("turn off the rugby rule until February") |
 | Rule dry runs over history (Phase 2, slice 2; web: read-back + Test button on Rules) | ✅ `rule test <id\|words\|"new rule">` `[--days N]`; `rule add`/`edit` print it before y/N | ✅ dry_run_rule; create_rule returns `dry_run` | ✅ /rule test 3 (or new wording); /rule read-back includes it |
 | Suggested rules (Phase 2, slice 2; web: Suggested on Rules: Save / Not now / Never) | ✅ `rule suggest`, `rule suggest --accept N` / `--dismiss N` | ✅ rule_suggestions, accept_rule_suggestion, dismiss_rule_suggestion | ✅ /suggestrules (✅ Save / ✖ Never), hint in /rules, 💡 line in the brief |
+| Trackers: boards (F5; web: Trackers page, home line "📦 3 in transit · 🟢 all services up · 🎟 1 on sale Fri", brief section) | ✅ `trackers`, `tracker show <id\|words>` | ✅ trackers, tracker_items (tracker?, state?, include_closed) | ✅ /trackers, /tracker show 2, push on change |
+| Trackers: create / save / pause / resume / delete / test | ✅ `tracker add "<text>" [--yes]`, `tracker off\|on\|rm <id>`, `tracker test <id\|"text">`, `tracker edit` | ✅ create_tracker (read-back + dry run), confirm_tracker, set_tracker_enabled, delete_tracker, dry_run_tracker | ✅ /track (✅ Save / ✖ Cancel), /tracker off·on·rm·test, buttons on /trackers |
+| Projects: list / status (Phase 3; web: Projects page + detail page, home line "🗂 3 projects · 5 open asks · next: Presentation night Fri", brief section) | ✅ `projects`, `project status\|show <name>`, `project facts <name>`, `ask "status of …"` | ✅ list_projects, project_status, project_facts | ✅ /projects, /project &lt;name&gt;, free text ("where are we with …") |
+| Projects: create / save / done / archive / delete / move / file an email | ✅ `project add "<text>" [--yes] [--under P] [--item N]`, `project done\|archive\|on\|rm`, `project move <p> --under <parent>`, `project link\|unlink <id> <p>`, `project suggest` | ✅ create_project (read-back + dry run), confirm_project, set_project_status, link_to_project | ✅ /project add (✅ Save / ✖ Cancel), /project done·archive·rm, suggested sub-projects under /projects (✅ Create / ✖ Never); web: "Add to project" on every email |
+| Thread status (any thread) | ✅ `thread-status <id\|"words">` | ✅ thread_status(item_id?, query?) | ✅ "status of &lt;words&gt;" when no project has that name; web: Thread status button on an email |
+| Trackers: status questions and suggestions | ✅ `ask "what's still in transit?"`, `tracker suggest [--accept N\|--dismiss N]` | ✅ trackers / tracker_items | ✅ free text ("is everything up?", "track my Acme Shop orders"), suggestions under /trackers (✅ Track / ✖ Never) |
 
 **Query understanding (2026-10-07):** free-text questions are read into filters first (`src/emaild/query.py`): sender (fuzzy-matched against senders you actually have, so "JB Hi-Fi" finds `offers@email.jbhifi.com.au`), date window in your time zone, newest vs most relevant, how many, and whether you want a list of emails or an answer. Obvious shapes ("last 5 emails from X this week") are parsed with regexes; other questions take one schema-bound Gemma call (only your question and today's date go in, never email content), validated in Python, with the regex reading as fallback. Every reply says how it was interpreted.
 
@@ -97,6 +114,17 @@ Every operation should be available wherever you are: in a terminal, in an MCP c
 ---
 
 ## F5. Trackers: status boards configured in plain language
+
+**Status: built (2026-10-07).** `src/emaild/trackers.py`, migration 014. Setup and examples: [SETUP.md §13](SETUP.md#13-trackers-f5). What shipped:
+- **Kinds.** `orders` (ordered → shipped → out for delivery → delivered; side states delayed, problem, return started, cancelled, refunded), `service` (up, degraded, down, maintenance, update available; F1), `onsale` (announced → presale → general sale → sold out; cancelled), and `custom` (the user's own steps, e.g. "lodged, in review, approved or refused"). Each built-in kind has a fixed state vocabulary, a field schema and a default notify policy, which the user can widen or narrow in words ("tell me when they're delivered too").
+- **Compile.** One Gemma call over only the user's words (rules machinery: strict validation, sender resolution incl. organisation domains), with a deterministic fallback for "track my X orders", "track my orders (from X)", "track X status", "(from X,) tell me when tickets (for/from Y) go on sale". The read-back is generated in Python from the compiled form, plus a 90-day dry run (items and states found; the model reads at most 8 emails for a read-back, never more than 20; the subject-line patterns give an estimate without the model). Trackers start pending and only run once saved.
+- **Extraction.** One narrow, schema-bound Gemma call per email (`{is_relevant, item_key, title, state, occurred_at, fields}`; the email is wrapped in `<email>` tags, first 3,000 characters, never obeyed), validated in Python: state must be in the kind's vocabulary, links https only, dates must parse, the key must be non-empty. Fixed templates (order number + status words, service status words) are read from the subject when the model call fails.
+- **Matching and state.** Items match by normalised key (order number, service/component, event name); without an identifier, a fuzzy title match over open items of the same tracker (never across trackers). Main states only move forward; side states apply any time (a "delayed" notice can't follow delivery); emails older than the item's last change are ignored as stale; repeats only refresh last-heard. Finished items leave the board (orders: delivered + 7 days, cancelled + 3, refunded at once; on-sale: sold out/cancelled + 7) and stay in history. Orders shipped 9+ days ago (out for delivery 2+) are flagged *stalled* on the board (computed, not a state).
+- **Pipeline.** In the worker, after triage (so security, spam and one-time verdicts exist and win): each active tracker reads matching, triaged, safe emails from the last 30 days that it hasn't read yet (`tracker_events` records every consumed email), oldest first, at most 30 per cycle (each at most one model call). A new tracker therefore backfills its board quietly: only emails from the last 48 hours notify.
+- **Archive-on-capture (conservative).** Once a *status-only* email's value is on the board (orders: shipped / out for delivery / delivered / delayed; services: any; on-sale and custom: never), emAIl's *open* proposal for it may change from keep to archive, with the reason "Captured by tracker …". Never for an event that notifies, a reviewed decision, an alert, a security / one-time / duplicate decision, a decision made by the user's own rules, or personal mail from a real person.
+- **Notifications.** Telegram, outside quiet hours and not when muted, one line per change ("📦 Acme Shop order 123-456: **shipped** (expected Fri)", "🟢 Example VPN: **recovered** (was down)"). Defaults: orders notify on ordered, shipped, delayed, problem, cancelled (delivered and out for delivery are silent); services on every change (and "recovered"); on-sale on presale, general sale and cancelled, plus a reminder on the morning of each sale date; custom on every change. Services with a cadence ("it reports daily") warn when they go quiet.
+- **Suggestions.** Recurring order/status mail from one non-free-mail domain (3+ in 60 days, not already tracked) is suggested ("Track my orders from acmeshop.example.com?"); Track / Not now / Never, like rule suggestions.
+- **Natural language.** "track my … orders/status/tickets" creates a tracker; "what's still in transit?", "is everything up?", "any tickets going on sale soon?" are answered from the boards (no model call) when that kind is tracked, otherwise they go to the normal email search.
 
 **Idea:** a lot of email is really a *state change* for something you care about: an order moving from ordered to delivered, a service going down, tickets going on sale. Instead of reading each email, you say in plain language what to track, and emAIl keeps a **board of items and their current status**. It tells you only about the changes you said matter. F1 (service status) becomes one tracker type; the machinery is shared.
 
@@ -174,4 +202,34 @@ Adding a scope means re-linking each account once (consent screen). It should be
 **Surfaces:** dashboard (Draft button on an email and a "New draft" box), Telegram (`/draft …`, plus "✍️ Draft reply" on alert cards), MCP (`draft_email`, `draft_reply(item_id, instructions)`), CLI (`emaild draft "..."`).
 
 **Relation to other plans:** this is the start of Phase 6 (drafts in your voice). Option A is independent of Phase 4's write access; Option B shares its re-consent step with F2 (deleting expired codes needs `gmail.modify` anyway — if both are wanted, `gmail.modify` covers drafts too, so one re-link would do).
+
+
+---
+
+## F8. Deterministic-first triage (fast path ahead of the LLM)
+
+**Idea:** most triage decisions don't need a language model. A sender you always archive, a newsletter you never open, a club you always keep — these are predictable from structured signals and your own past verdicts. Decide those in about a millisecond, explainably, and send only the uncertain or language-heavy cases to Gemma. Fewer model calls, faster cycles, and a clear "why" for every decision.
+
+**Reviewed and rejected: Laya** (github.com/NandhaKishorM/laya, reviewed at v0.3.29). Despite the "decision system" label it is a 322M–421M-parameter neural text classifier, near chance before fine-tuning (by its own README), prone to collapsing to the majority class on a few hundred rows, text-only (our best signals are structured), probability-only (no per-feature "why"), and adds torch plus a ~1.7 GB model to the container. **Ideas borrowed from it:** per-action abstention thresholds that fail closed, an explicit decided / deferred / not-evaluated state per email, and shadow → compare → promote adoption.
+
+**Proposed design**
+- **Where it sits:** security → one-time codes → duplicates → user rules → **fast path** → Gemma → guards/floors → review policy. Safety checks and your rules keep priority; guards still apply after the fast path.
+- **What it is:** a calibrated logistic-regression model over hand-built features (sender history, list/bulk headers, labels, auth results, rule matches, account, time patterns) plus a k-nearest-neighbour vote over the in-database MiniLM embeddings of your reviewed emails (the same retrieval `find_examples` already does). Sub-millisecond per email; trains from the `decisions` table in under a second; adds only scikit-learn. (Oracle's in-database ML is an alternative if available in 26ai Free — to confirm.)
+- **Abstains unless sure:** it only decides keep/archive when calibrated confidence clears a per-action threshold; alerts, low-confidence and genuinely language-dependent emails go to Gemma as today.
+- **Explainable:** `explain` shows the top features and nearest past verdicts, e.g. *"archive: newsletter headers, you archived 14 of 14 from this sender"*.
+- **Stays on Gemma permanently:** content summaries, project facts, thread status, rule topic checks, answers to questions, and compiling plain-language rules/trackers/projects.
+
+**Prerequisite — an honest benchmark (Phase A, ~half a day)**
+The review found probable label leakage: `sender_keeps`, `sender_overridden`, `sender_cleared`, `find_examples` and sender stats can count the email being scored (or replies sent after it). Fix with point-in-time ("as of") exclusions, make `benchmark` run the full `decide()` pipeline, report precision / coverage / hidden-wanted per action and per decision source, and count LLM calls per cycle from `llm_calls` — then re-baseline Gemma.
+
+**Rollout**
+1. Phase A — benchmark fix and baseline (above).
+2. Phase B — feature view + model training (migration for model/metrics storage), `fastpath.py`, `EMAILD_FASTPATH=off|shadow|on` (default `off`).
+3. Phase C — **shadow mode**: run alongside Gemma, log both, compare in the benchmark.
+4. Phase D — switch on **per action** once precision clears the bar on reviewed mail; demote automatically if spot checks slip. This is the natural on-ramp to Phase 4 (earned autonomy).
+5. Later — consider the same pattern for tracker state extraction (templated status emails) and project sub-project choice.
+
+**Metrics to watch:** LLM calls per cycle, latency per email, action accuracy, hidden-wanted (archived something you'd keep), review volume, fast-path coverage.
+
+Full review and plan: `emAIl-laya-review.md` in the project docs.
 

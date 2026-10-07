@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from google_auth_oauthlib.flow import Flow
 
 from .. import brief as brief_mod
-from .. import crypto, db, recommend, store, telegram, threads, triage, users
+from .. import crypto, db, projects, recommend, store, telegram, threads, trackers, triage, users
 from ..channels import outlook
 from ..channels.gmail import SCOPES, GmailChannel
 from ..config import settings
@@ -81,7 +81,9 @@ def _page_data(conn, ctx) -> dict:
     tstats = triage.stats(conn)
     return {"status": store.status(conn), "tstats": tstats, "waiting": tstats["waiting_review"],
             "needs": brief_mod.needs_you(conn, days=3), "codes": brief_mod.active_codes(conn),
-            "reco": recommend.counts(conn, ctx.user_id)}  # cached 10 min: this panel refreshes every 30 s
+            "reco": recommend.counts(conn, ctx.user_id),   # cached 10 min: this panel refreshes every 30 s
+            "trackers_line": trackers.home_line(conn, ctx.user_id),   # cached 5 min; '' before migration 014
+            "projects_line": projects.home_line(conn, ctx.user_id)}   # cached 5 min; '' before migration 015
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -332,6 +334,246 @@ def rules_delete(rule_id: int):
     return HTMLResponse("")
 
 
+# ---------- trackers (F5) ----------
+
+def _trackers_macro(name: str):
+    return getattr(templates.env.get_template("_trackers.html").module, name)
+
+
+def _board(conn, tracker_id: int) -> HTMLResponse:
+    b = trackers.board(conn, tracker_id)
+    if b is None or b["tracker"]["status"] == "deleted":
+        return HTMLResponse("")
+    return HTMLResponse(str(_trackers_macro("board")(b)))
+
+
+@app.get("/trackers", response_class=HTMLResponse)
+def trackers_page(request: Request):
+    ctx = users.resolve()
+    with db.user_session(ctx) as conn:
+        boards = trackers.boards(conn)
+        waiting = triage.stats(conn)["waiting_review"]
+        suggestions = trackers.list_suggestions(conn, key=ctx.user_id)
+    return templates.TemplateResponse(request, "trackers.html", {"boards": boards, "page": "trackers",
+                                                                 "waiting": waiting, "suggestions": suggestions})
+
+
+@app.post("/trackers", response_class=HTMLResponse)
+def trackers_add(text: str = Form("")):
+    """Compile the user's words; show the read-back and dry run with Save / Cancel (pending until Save)."""
+    from ..llm.router import Router
+    text = text.strip()[:2000]
+    if not text:
+        return HTMLResponse("")
+    router = Router()
+    with db.user_session(users.resolve()) as conn:
+        t = trackers.create(conn, text, router, actor="web")
+        if not t.get("error"):
+            t["dry_run"] = trackers.dry_run_safe(conn, t, router)
+    if t.get("error"):
+        return HTMLResponse(f'<div class="card err">{html.escape(t["error"])}</div>')
+    return HTMLResponse(str(_trackers_macro("proposal")(t)))
+
+
+@app.post("/trackers/{tracker_id}/test", response_class=HTMLResponse)
+def trackers_test(tracker_id: int):
+    from ..llm.router import Router
+    with db.user_session(users.resolve()) as conn:
+        res = trackers.dry_run_ref(conn, str(int(tracker_id)), router=Router())
+    if res.get("error"):
+        return HTMLResponse(f'<div class="err" id="tt{tracker_id}">{html.escape(res["error"])}</div>')
+    return HTMLResponse(str(_trackers_macro("dry_run")(res["dry_run"], f"tt{tracker_id}")))
+
+
+@app.post("/trackers/suggestions/{sid}/accept", response_class=HTMLResponse)
+def trackers_suggestion_accept(sid: int):
+    with db.user_session(users.resolve()) as conn:
+        res = trackers.accept_suggestion(conn, sid, actor="web")
+    if res.get("error"):
+        return HTMLResponse(f'<div class="li err" id="ts{sid}">{html.escape(res["error"])}</div>')
+    t = res["tracker"]
+    return HTMLResponse(f'<div class="done" id="ts{sid}">✅ Tracking as #{int(t["id"])}: '
+                        f'{html.escape(t.get("readback") or "")}</div>')
+
+
+@app.post("/trackers/suggestions/{sid}/dismiss", response_class=HTMLResponse)
+def trackers_suggestion_dismiss(sid: int):
+    with db.user_session(users.resolve()) as conn:
+        trackers.dismiss_suggestion(conn, sid, actor="web")
+    return HTMLResponse(f'<div class="done" id="ts{sid}">✖ Won\'t suggest that again</div>')
+
+
+@app.post("/trackers/{tracker_id}/confirm", response_class=HTMLResponse)
+def trackers_confirm(tracker_id: int):
+    with db.user_session(users.resolve()) as conn:
+        trackers.confirm(conn, tracker_id, actor="web")
+        return _board(conn, tracker_id)
+
+
+@app.post("/trackers/{tracker_id}/cancel", response_class=HTMLResponse)
+def trackers_cancel(tracker_id: int):
+    with db.user_session(users.resolve()) as conn:
+        t = trackers.get(conn, tracker_id)
+        if t and t["status"] == "pending" and t["version"] == 1:
+            trackers.delete(conn, tracker_id, actor="web")
+            return HTMLResponse('<div class="done">✖ Cancelled</div>')
+        return _board(conn, tracker_id)
+
+
+@app.post("/trackers/{tracker_id}/{op}", response_class=HTMLResponse)
+def trackers_op(tracker_id: int, op: str):
+    if op not in ("on", "off", "delete"):
+        raise HTTPException(404, "unknown operation")
+    with db.user_session(users.resolve()) as conn:
+        if op == "delete":
+            trackers.delete(conn, tracker_id, actor="web")
+            return HTMLResponse("")
+        trackers.set_enabled(conn, tracker_id, op == "on", actor="web")
+        return _board(conn, tracker_id)
+
+
+# ---------- projects (Phase 3) ----------
+
+def _projects_macro(name: str):
+    return getattr(templates.env.get_template("_projects.html").module, name)
+
+
+@app.get("/projects", response_class=HTMLResponse)
+def projects_page(request: Request):
+    ctx = users.resolve()
+    with db.user_session(ctx) as conn:
+        rows = projects.overview_rows(conn)
+        waiting = triage.stats(conn)["waiting_review"]
+        suggestions = projects.list_suggestions(conn)
+    return templates.TemplateResponse(request, "projects.html", {"rows": rows, "page": "projects",
+                                                                 "waiting": waiting, "suggestions": suggestions})
+
+
+@app.post("/projects", response_class=HTMLResponse)
+def projects_add(text: str = Form(""), parent: str = Form(""), item_id: str = Form("")):
+    """Compile the user's words; show the read-back and dry run with Save / Cancel (pending until Save)."""
+    from ..llm.router import Router
+    text = text.strip()[:2000]
+    iid = int(item_id) if item_id.strip().isdigit() else None
+    if not text and iid is None:
+        return HTMLResponse("")
+    router = Router()
+    with db.user_session(users.resolve()) as conn:
+        p = projects.create(conn, text, router, actor="web", parent=parent.strip() or None, item_id=iid)
+        if not p.get("error"):
+            p["dry_run"] = projects.dry_run_safe(conn, p, router)
+    if p.get("error"):
+        return HTMLResponse(f'<div class="card err">{html.escape(p["error"])}</div>')
+    return HTMLResponse(str(_projects_macro("proposal")(p)))
+
+
+@app.get("/projects/{project_id}", response_class=HTMLResponse)
+def project_page(request: Request, project_id: int):
+    ctx = users.resolve()
+    with db.user_session(ctx) as conn:
+        p = projects.get(conn, project_id)
+        if p is None or p["status"] == "deleted":
+            raise HTTPException(404, "not found")
+        st = projects.project_status(conn, p)
+        others = [r for r in projects.list_projects(conn) if r["id"] != p["id"]]
+        waiting = triage.stats(conn)["waiting_review"]
+    return templates.TemplateResponse(request, "project.html", {"p": p, "st": st, "others": others,
+                                                                "page": "projects", "waiting": waiting})
+
+
+@app.post("/projects/{project_id}/overview", response_class=HTMLResponse)
+def project_overview(project_id: int):
+    """Gemma's 2-3 sentence overview, written from the facts only (on demand: it's a model call)."""
+    from ..llm.router import Router
+    with db.user_session(users.resolve()) as conn:
+        st = projects.project_status(conn, project_id, Router(), with_overview=True)
+    text = st.get("overview") or ("Nothing to summarise yet." if not st.get("error") else st["error"])
+    return HTMLResponse(f'<p class="overview" id="ov">{html.escape(text)}</p>')
+
+
+@app.post("/projects/{project_id}/confirm", response_class=HTMLResponse)
+def projects_confirm(project_id: int):
+    with db.user_session(users.resolve()) as conn:
+        res = projects.confirm(conn, project_id, actor="web")
+        p = projects.get(conn, project_id)
+    if not res["active"] or p is None:
+        return HTMLResponse('<div class="err">Not saved (it may have been cancelled).</div>')
+    extra = f" {int(res['linked'])} emails from the thread filed." if res.get("linked") else ""
+    return HTMLResponse(f'<div class="done" id="pr{int(project_id)}">✅ Saved: <a href="/projects/{int(project_id)}">'
+                        f'{html.escape(p["name"])}</a>.{extra} Matching emails from the last '
+                        f'{projects.WINDOW_DAYS} days are filed over the next few minutes.</div>')
+
+
+@app.post("/projects/{project_id}/cancel", response_class=HTMLResponse)
+def projects_cancel(project_id: int):
+    with db.user_session(users.resolve()) as conn:
+        p = projects.get(conn, project_id)
+        if p and p["status"] == "pending":
+            projects.delete(conn, project_id, actor="web")
+    return HTMLResponse('<div class="done">✖ Cancelled</div>')
+
+
+@app.post("/projects/{project_id}/move")
+def projects_move(project_id: int, parent: str = Form("")):
+    with db.user_session(users.resolve()) as conn:
+        res = projects.move(conn, project_id, parent.strip() or None, actor="web")
+    if res.get("error"):
+        return HTMLResponse(f'<div class="err">{html.escape(res["error"])}</div>', status_code=400)
+    return RedirectResponse(f"/projects/{int(project_id)}", status_code=303)
+
+
+@app.post("/projects/{project_id}/{op}")
+def projects_op(project_id: int, op: str):
+    status = {"done": "done", "archive": "archived", "reopen": "active", "delete": "deleted"}.get(op)
+    if status is None:
+        raise HTTPException(404, "unknown operation")
+    with db.user_session(users.resolve()) as conn:
+        projects.set_status(conn, project_id, status, actor="web")
+    return RedirectResponse("/projects" if op == "delete" else f"/projects/{int(project_id)}", status_code=303)
+
+
+@app.post("/projects/suggestions/{sid}/accept", response_class=HTMLResponse)
+def projects_suggestion_accept(sid: int):
+    with db.user_session(users.resolve()) as conn:
+        res = projects.accept_suggestion(conn, sid, actor="web")
+    if res.get("error"):
+        return HTMLResponse(f'<div class="li err" id="ps{sid}">{html.escape(res["error"])}</div>')
+    p = res["project"]
+    return HTMLResponse(f'<div class="done" id="ps{sid}">✅ Created <a href="/projects/{int(p["id"])}">'
+                        f'{html.escape(p["name"])}</a></div>')
+
+
+@app.post("/projects/suggestions/{sid}/dismiss", response_class=HTMLResponse)
+def projects_suggestion_dismiss(sid: int):
+    with db.user_session(users.resolve()) as conn:
+        projects.dismiss_suggestion(conn, sid, actor="web")
+    return HTMLResponse(f'<div class="done" id="ps{sid}">✖ Won\'t suggest that again</div>')
+
+
+@app.post("/item/{item_id}/project", response_class=HTMLResponse)
+def item_add_to_project(item_id: int, project: str = Form("")):
+    """'Add to project' on an email: files it (and its thread's later replies) under the chosen project."""
+    if not project.strip():
+        return HTMLResponse('<span class="err">Pick a project.</span>')
+    with db.user_session(users.resolve()) as conn:
+        res = projects.link(conn, item_id, project.strip(), actor="web")
+    if res.get("error"):
+        return HTMLResponse(f'<span class="err">{html.escape(res["error"])}</span>')
+    return HTMLResponse(f'<span class="done">📁 Filed under <a href="/projects/{int(res["project_id"])}">'
+                        f'{html.escape(res["project"])}</a></span>')
+
+
+@app.post("/item/{item_id}/thread-status", response_class=HTMLResponse)
+def item_thread_status(item_id: int):
+    from ..llm.router import Router
+    with db.user_session(users.resolve()) as conn:
+        ts = projects.thread_status(conn, item_id, router=Router())
+    if ts.get("error"):
+        return HTMLResponse(f'<div class="err" id="ts">{html.escape(ts["error"])}</div>')
+    return HTMLResponse('<div class="card" id="ts">' + "<br>".join(html.escape(x) for x in projects.thread_lines(ts))
+                        + "</div>")
+
+
 @app.get("/brief", response_class=HTMLResponse)
 def brief_page(request: Request):
     ctx = users.resolve()
@@ -408,7 +650,17 @@ def item_page(request: Request, item_id: int):
         if item is None:
             raise HTTPException(404, "not found")
         decision = triage.decision_for_item(conn, item_id)
-    return templates.TemplateResponse(request, "item.html", {"item": item, "decision": decision, "page": ""})
+        try:                                   # [] before migration 015
+            rows = projects.list_projects(conn)
+            names = {r["id"]: r["name"] for r in rows}
+            plist = [{"id": r["id"], "name": f"{names[r['parent_id']]} / {r['name']}" if r["parent_id"] in names
+                      else r["name"]} for r in rows if r["status"] == "active"]
+            plist.sort(key=lambda r: r["name"].lower())
+        except Exception:
+            plist = []
+        filed = projects.links_for_item(conn, item_id)
+    return templates.TemplateResponse(request, "item.html", {"item": item, "decision": decision, "page": "",
+                                                             "projects": plist, "filed": filed})
 
 
 def _flow(state: str | None = None) -> Flow:

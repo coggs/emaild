@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_projects.html" import fact, status_label %}
+{% block title %}{{ p.name }} · emAIl{% endblock %}
+{% block content %}
+<p class="muted" style="margin:14px 0 0"><a class="hint" href="/projects">← Projects</a>{% if st.parent %} · in
+  <a class="hint" href="/projects/{{ p.parent_id }}">{{ st.parent }}</a>{% endif %}</p>
+<h1>{{ '🗂' if p.kind == 'umbrella' else '📁' }} {{ p.name }} <span class="chip{% if p.status == 'active' %} on{% endif %}">{{ status_label(p) }}</span></h1>
+<p class="muted">{{ st.summary }}</p>
+<p id="ov" class="overview"><button class="btn ghost" hx-post="/projects/{{ p.id }}/overview" hx-target="#ov" hx-swap="outerHTML"
+  title="Gemma writes 2-3 sentences from the facts below (never from raw email)">Overview</button></p>
+
+{% if st.children %}
+<h2>Sub-projects</h2>
+<div class="list">{% for c in st.children %}<div class="li"><a href="/projects/{{ c.id }}">📁 {{ c.name }}</a>
+  {% if c.status != 'active' %}<span class="chip">{{ status_label(c) }}</span>{% endif %} <span class="s">{{ c.line }}</span></div>{% endfor %}</div>
+{% endif %}
+
+{% if st.children or st.general %}
+  {% if st.general %}<h2>General business</h2><div class="list">{% for f in st.general %}{{ fact(f) }}{% endfor %}</div>{% endif %}
+  {% if st.upcoming %}<h2>⏰ Coming up</h2><div class="list">{% for f in st.upcoming %}{{ fact(f) }}{% endfor %}</div>{% endif %}
+{% else %}
+  {% for t, label in [('ask', '🙋 Asks of you'), ('deadline', '⏰ Deadlines'), ('commitment', '🤝 Commitments'), ('decision', '✅ Decisions'), ('open_question', '❓ Open questions'), ('info', 'ℹ️ Good to know')] %}
+    {% if st.facts[t] %}<h2>{{ label }}</h2><div class="list">{% for f in st.facts[t] %}{{ fact(f) }}{% endfor %}</div>{% endif %}
+  {% endfor %}
+{% endif %}
+{% if not st.open_total %}<p class="muted">{{ 'Nothing open.' if st.threads else 'No emails filed yet — matching emails are filed by the worker every few minutes.' }}</p>{% endif %}
+
+{% if st.waiting %}
+<h2>Waiting</h2>
+<div class="list">{% for w in st.waiting %}<div class="li">{% if w.on == 'me' %}↩️ On you — {{ w.who }}{% else %}⏳ On {{ w.who }} (you wrote last){% endif %}:
+  <a href="/item/{{ w.item_id }}">{{ w.subject }}</a>{% if w.days is not none %} <span class="s">· {{ w.days }} day{{ 's' if w.days != 1 }}</span>{% endif %}</div>{% endfor %}</div>
+{% endif %}
+
+{% if st.timeline %}
+<h2>Timeline</h2>
+<div class="list">{% for e in st.timeline %}<div class="li"><span class="s">{{ e.at }} · {{ e.kind }}</span> {% if e.item_id %}<a href="/item/{{ e.item_id }}">{{ e.text }}</a>{% else %}{{ e.text }}{% endif %}</div>{% endfor %}</div>
+{% endif %}
+
+{% if st.related %}<p class="muted">Related: {% for r in st.related %}<a href="/projects/{{ r.id }}">{{ r.name }}</a>{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+
+<details class="closed"><summary>How it files</summary><p class="s muted">{{ p.readback }}</p>
+  <p class="s muted">Your words: {{ p.original_text }}</p></details>
+
+<div class="row">
+  {% if p.status == 'pending' %}
+  <form method="post" action="/projects/{{ p.id }}/confirm" hx-post="/projects/{{ p.id }}/confirm" hx-target="this" hx-swap="outerHTML"><button class="btn">Save</button></form>
+  {% elif p.status == 'active' %}
+  <form method="post" action="/projects/{{ p.id }}/done"><button class="btn ghost">Done</button></form>
+  <form method="post" action="/projects/{{ p.id }}/archive"><button class="btn ghost">Archive</button></form>
+  {% else %}
+  <form method="post" action="/projects/{{ p.id }}/reopen"><button class="btn ghost">Reopen</button></form>
+  {% endif %}
+  <form method="post" action="/projects/{{ p.id }}/move" class="row" style="margin:0">
+    <select name="parent"><option value="">(top level)</option>
+      {% for o in others %}{% if o.parent_id != p.id %}<option value="{{ o.id }}"{% if o.id == p.parent_id %} selected{% endif %}>{{ o.name }}</option>{% endif %}{% endfor %}
+    </select><button class="btn ghost">Move</button></form>
+  <form method="post" action="/projects/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}? Its sub-projects move up a level.')"><button class="btn ghost">Delete</button></form>
+</div>
+{% endblock %}

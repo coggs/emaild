@@ -9,6 +9,12 @@
 {% if reco and (reco.unsubs or reco.followups) %}
 <a class="hint" href="/recommendations">{% if reco.unsubs %}🧹 {{ reco.unsubs }} unsubscribe suggestion{{ 's' if reco.unsubs != 1 }}{% endif %}{% if reco.unsubs and reco.followups %} · {% endif %}{% if reco.followups %}⏳ {{ reco.followups }} follow-up{{ 's' if reco.followups != 1 }}{% endif %} →</a>
 {% endif %}
+{% if trackers_line %}
+<a class="hint" href="/trackers">{{ trackers_line }} →</a>
+{% endif %}
+{% if projects_line %}
+<a class="hint" href="/projects">{{ projects_line }} →</a>
+{% endif %}
 {% if codes %}
 <h2>🔑 Active sign-in codes</h2>
 <div class="list">{% for c in codes %}<div class="li"><b>{{ c.sender }}</b> — {{ c.subject }}

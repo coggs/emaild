@@ -49,6 +49,12 @@
   .hint { display:inline-block; margin:6px 0 2px; color:var(--muted); text-decoration:none; font-size:14px; }
   .hint:hover { color:var(--fg); }
   h2 { font-size:15px; margin:22px 0 4px; }
+  .pill { display:inline-block; border-radius:999px; padding:1px 9px; font-size:12px; background:var(--chip); }
+  .pill.good { background:var(--ok); color:#fff; } .pill.bad { background:var(--bad); color:#fff; }
+  .pill.warn { background:var(--warn); color:#fff; } .pill.info { background:var(--chip); }
+  .board td .s { color:var(--muted); font-size:12px; } .board td a { color:inherit; }
+  details.closed summary { cursor:pointer; color:var(--muted); font-size:13px; margin:6px 0; }
+  .project td a, .list .li a { color:inherit; } p.overview { margin:6px 0 10px; }
   pre.body { white-space:pre-wrap; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; font:14px/1.5 system-ui, sans-serif; }
 </style>
 </head>
@@ -59,6 +65,8 @@
   <a href="/triage" class="{{ 'on' if page == 'triage' }}">Review{% if waiting %} ({{ waiting }}){% endif %}</a>
   <a href="/recommendations" class="{{ 'on' if page == 'recommendations' }}">Recommendations</a>
   <a href="/rules" class="{{ 'on' if page == 'rules' }}">Rules</a>
+  <a href="/trackers" class="{{ 'on' if page == 'trackers' }}">Trackers</a>
+  <a href="/projects" class="{{ 'on' if page == 'projects' }}">Projects</a>
   <a href="/telegram" class="{{ 'on' if page == 'telegram' }}">Telegram</a>
 </nav>
 {% block content %}{% endblock %}

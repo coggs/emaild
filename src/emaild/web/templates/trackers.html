@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "_trackers.html" import board, suggestion %}
+{% block title %}Trackers · emAIl{% endblock %}
+{% block content %}
+<h1>Trackers</h1>
+<p class="muted">Say what to keep an eye on; emAIl turns the emails into a board and only tells you about the changes
+  that matter. Each tracker is read back to you (with what it finds in the last 90 days) before it's saved.
+  Spam, phishing and one-time codes are never read.</p>
+
+<form class="card" hx-post="/trackers" hx-target="#proposal" hx-swap="innerHTML">
+  <div class="row" style="margin-top:0">
+    <input type="text" name="text" maxlength="2000" required placeholder="e.g. Track my Acme Shop orders">
+    <button class="btn">Add a tracker</button>
+  </div>
+  <div class="s muted" style="font-size:13px;margin-top:6px">More: “Track Example VPN and Example CDN status” ·
+    “From NSFC, tell me when tickets or a ballot go on sale” · “Track my orders”</div>
+</form>
+<div id="proposal"></div>
+
+{% if suggestions %}
+<h2>Suggested</h2>
+<p class="muted">Recurring order or status emails nothing tracks yet.</p>
+<div class="list">{% for sg in suggestions %}{{ suggestion(sg) }}{% endfor %}</div>
+{% endif %}
+
+{% if boards %}
+{% for b in boards %}{{ board(b) }}{% endfor %}
+{% else %}
+<p class="muted">No trackers yet.</p>
+{% endif %}
+{% endblock %}

@@ -136,6 +136,11 @@ def build(conn: oracledb.Connection, since: datetime, until: datetime | None = N
     unsubs = len(recommend.unsubscribe_candidates(conn))
     from . import rules  # late import: rules uses this module's FINAL_ACTION
     rule_suggestions = rules.count_suggestions(conn)
+    from . import trackers  # [] / 0 before migration 014 or without trackers
+    tracker_lines = trackers.brief_lines(conn, since)
+    tracker_suggestions = trackers.count_suggestions(conn)
+    from . import projects  # [] before migration 015 or without projects (never raises)
+    project_lines = projects.brief_lines(conn, since)
     tz = ZoneInfo(settings().timezone)
     local = lambda d: d.astimezone(tz).strftime("%a %d %b %H:%M")  # noqa: E731
     return {
@@ -146,6 +151,7 @@ def build(conn: oracledb.Connection, since: datetime, until: datetime | None = N
         "new_senders": new_senders, "waiting_review": stats["waiting_review"], "account_problems": problems,
         "held_back": held_back, "codes_expired": codes,
         "waiting_on_others": waiting_on, "unsub_suggestions": unsubs, "rule_suggestions": rule_suggestions,
+        "trackers": tracker_lines, "tracker_suggestions": tracker_suggestions, "projects": project_lines,
         "overview": None,
     }
 
@@ -241,6 +247,12 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
     if waiting_on:
         out.append(f"\n<b>⏳ Waiting on others</b> ({len(waiting_on)})")
         out.extend(_waiting_line(r, detail) for r in waiting_on[:6])
+    if b.get("trackers"):
+        out.append("\n<b>📋 Trackers</b>")
+        out.extend(html.escape(line) for line in b["trackers"][:8])
+    if b.get("projects"):
+        out.append("\n<b>🗂 Projects</b>")
+        out.extend(html.escape(line) for line in b["projects"][:10])
     archived = (b.get("by_action") or {}).get("archive", 0)
     tail = []
     if archived:
@@ -258,6 +270,9 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
     if b.get("rule_suggestions"):
         n = int(b["rule_suggestions"])
         tail.append(f"💡 {n} rule suggestion{'s' if n != 1 else ''} — /suggestrules")
+    if b.get("tracker_suggestions"):
+        n = int(b["tracker_suggestions"])
+        tail.append(f"📋 {n} tracker suggestion{'s' if n != 1 else ''} — /trackers")
     for p in b.get("account_problems") or []:
         tail.append(f"⚠️ {html.escape(p['account'])}: {html.escape(p['status'])}")
     if tail:

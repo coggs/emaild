@@ -5,6 +5,19 @@
 <p class="muted">{{ item['from'] }} · {{ item.date[:16] }}{% if item.attachments %} · 📎 {{ item.attachments | map(attribute='filename') | join(', ') }}{% endif %}</p>
 {% if decision %}<p><span class="chip {{ decision.action }}">{{ decision.action }}</span><span class="chip">{{ decision.importance }}</span>
 <span class="chip">{{ decision.category }}</span> <span class="muted" style="font-size:13px">{{ decision.status }} · {{ decision.reasons }}</span></p>{% endif %}
+<div class="row" style="margin:4px 0 10px">
+  {% if filed %}<span class="s">📁 In: {% for f in filed %}<a href="/projects/{{ f.id }}">{{ f.name }}</a>{{ ', ' if not loop.last }}{% endfor %}</span>{% endif %}
+  {% if projects %}
+  <form class="row" style="margin:0" hx-post="/item/{{ item.item_id }}/project" hx-target="#filed" hx-swap="innerHTML">
+    <select name="project"><option value="">Add to project…</option>
+      {% for p in projects %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
+    <button class="btn ghost">Add</button></form>
+  {% endif %}
+  <button class="btn ghost" hx-post="/item/{{ item.item_id }}/thread-status" hx-target="#ts" hx-swap="outerHTML"
+          title="Where this conversation stands (Gemma reads the thread)">Thread status</button>
+  <span id="filed"></span>
+</div>
+<div id="ts"></div>
 <pre class="body">{{ item.text }}</pre>
 <p class="muted" style="font-size:12px">Opening an original is logged — it's a signal that this kind of email matters to you.</p>
 {% endblock %}

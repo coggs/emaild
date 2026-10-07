@@ -18,9 +18,16 @@
 {% if b.waiting_on_others %}<h2>⏳ Waiting on others</h2>
 <div class="list">{% for f in b.waiting_on_others %}<div class="li"><a href="/item/{{ f.item_id }}" style="color:inherit;text-decoration:none" target="_blank"><b>{{ f.to }}</b> — {{ f.subject }}</a>
   <span class="s">· {{ f.days_waiting }} days, no reply yet</span></div>{% endfor %}</div>{% endif %}
+{% if b.trackers %}<h2>📋 Trackers</h2>
+<div class="list">{% for line in b.trackers %}<div class="li">{{ line }}</div>{% endfor %}</div>
+<p><a href="/trackers" class="hint">All boards →</a></p>{% endif %}
+{% if b.projects %}<h2>🗂 Projects</h2>
+<div class="list">{% for line in b.projects %}<div class="li">{{ line }}</div>{% endfor %}</div>
+<p><a href="/projects" class="hint">All projects →</a></p>{% endif %}
 {% if not (b.alerts or b.awaiting_reply or b.important) %}<p>Nothing needs you. 👌</p>{% endif %}
 {% if b.new_senders %}<h2>🆕 New senders</h2><p class="muted">{% for n in b.new_senders %}{{ n.sender }}{% if n.count > 1 %} ({{ n.count }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
 {% if b.unsub_suggestions %}<p><a href="/recommendations">🧹 {{ b.unsub_suggestions }} lists you could unsubscribe from →</a></p>{% endif %}
+{% if b.tracker_suggestions %}<p><a href="/trackers">📋 {{ b.tracker_suggestions }} tracker suggestion{{ 's' if b.tracker_suggestions != 1 }} →</a></p>{% endif %}
 {% if b.waiting_review %}<p><a href="/triage">{{ b.waiting_review }} waiting for your review →</a></p>{% endif %}
 {% for p in b.account_problems or [] %}<p class="err">⚠ {{ p.account }}: {{ p.status }} {{ p.error }}</p>{% endfor %}
 {% endif %}

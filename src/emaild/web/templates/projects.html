@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "_projects.html" import card, suggestion %}
+{% block title %}Projects · emAIl{% endblock %}
+{% block content %}
+<h1>Projects</h1>
+<p class="muted">An umbrella is something you're involved in that never finishes (a committee, the household); its
+  sub-projects are goals with an end. emAIl files the matching emails, notes the decisions, asks of you, commitments,
+  deadlines and open questions (each linked to its email) and tells you where things stand. Each project is read back
+  to you, with what it would have filed in the last 90 days, before it's saved. Spam, phishing and one-time codes are
+  never filed.</p>
+
+<form class="card" hx-post="/projects" hx-target="#proposal" hx-swap="innerHTML">
+  <div class="row" style="margin-top:0">
+    <input type="text" name="text" maxlength="2000" required
+           placeholder="e.g. Create a project for the NSFC committee, everything from nsfc.example.org">
+    <button class="btn">Add a project</button>
+  </div>
+  <div class="s muted" style="font-size:13px;margin-top:6px">More: “Add a sub-project under NSFC: presentation night” ·
+    “Track my kitchen renovation with the builder at builder.example.com”</div>
+</form>
+<div id="proposal"></div>
+
+{% if suggestions %}
+<h2>Suggested sub-projects</h2>
+<div class="list">{% for sg in suggestions %}{{ suggestion(sg) }}{% endfor %}</div>
+{% endif %}
+
+{% for top in rows %}{{ card(top) }}{% else %}<p class="muted">No projects yet.</p>{% endfor %}
+{% endblock %}

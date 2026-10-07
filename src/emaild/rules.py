@@ -11,6 +11,7 @@ content never reaches rule compilation - into a small, strictly validated JSON f
      "then":      {"action": "alert", "importance": null, "category": null},
      "else":      {"action": "archive", "importance": null, "category": null},  # matched sender, condition false
      "floor":     null,                                                        # "keep" = never archive
+     "project":   null,                                                        # Phase 3: file under this project
      "read_with_model": true}                                                  # = condition.topic is set
 
 - `match` is pure string work at triage time (no model call, no DB): see `matches()`.
@@ -19,6 +20,9 @@ content never reaches rule compilation - into a small, strictly validated JSON f
   prompt and answers `rule_condition_met`; Python then applies `then` / `else` (source "rule+llm").
 - `floor` "keep" applies after everything else: such mail is never archived (security verdicts still win).
 - kind "guidance" has no match: its text goes into the triage system prompt for every model call.
+- `project` (optional, Phase 3): file matching email under that project/sub-project ("... goes under the Canteen
+  sub-project"). Applied by the projects pipeline right after triage as an explicit link (the strongest filing signal);
+  with a topic, Gemma checks the topic first. A rule whose only effect is `project` never changes triage.
 
 The read-back the user confirms is generated deterministically from the compiled JSON (never the model's prose), so
 what they confirm is exactly what runs. Rules start 'pending' and only apply once confirmed. Wording and compiled
@@ -82,12 +86,9 @@ def _strs(v, where: str, limit: int, clean=None) -> list[str]:
     return list(dict.fromkeys(x for x in xs if x))[:limit]
 
 
-def validate_compiled(c) -> dict:
-    """Normalise a compiled rule, or raise ValueError. Used on every compile and on load, so nothing malformed can
-    reach the matcher."""
-    if not isinstance(c, dict):
-        raise ValueError("a compiled rule must be an object")
-    m = c.get("match") or {}
+def validate_match(m) -> dict:
+    """Normalise a compiled `match`, or raise ValueError. Shared with trackers (F5), which reuse the rule matcher."""
+    m = m or {}
     if not isinstance(m, dict):
         raise ValueError("match must be an object")
     res = m.get("resolved") or {}
@@ -109,6 +110,15 @@ def validate_compiled(c) -> dict:
             raise ValueError(f"not a domain: {d[:60]!r}")
     if not (match["senders"] or match["sender_addrs"] or match["domains"] or match["subject_any"]):
         raise ValueError("the rule doesn't say which emails it's about (no sender, domain or subject words)")
+    return match
+
+
+def validate_compiled(c) -> dict:
+    """Normalise a compiled rule, or raise ValueError. Used on every compile and on load, so nothing malformed can
+    reach the matcher."""
+    if not isinstance(c, dict):
+        raise ValueError("a compiled rule must be an object")
+    match = validate_match(c.get("match"))
     cond = c.get("condition") or {}
     if not isinstance(cond, dict):
         raise ValueError("condition must be an object")
@@ -120,10 +130,35 @@ def validate_compiled(c) -> dict:
         raise ValueError("floor must be 'keep' or null")
     if has_effect(els) and not topic:
         raise ValueError("'otherwise' needs a condition to be false")
-    if not (has_effect(then) or has_effect(els) or floor):
-        raise ValueError("the rule doesn't say what to do (alert, keep, archive, importance or never archive)")
-    return {"match": match, "condition": {"topic": topic}, "then": then,
-            "else": els if has_effect(els) else None, "floor": floor, "read_with_model": bool(topic)}
+    project = _project_phrase(c.get("project"))
+    if not (has_effect(then) or has_effect(els) or floor or project):
+        raise ValueError("the rule doesn't say what to do (alert, keep, archive, importance, never archive or a "
+                         "project)")
+    out = {"match": match, "condition": {"topic": topic}, "then": then,
+           "else": els if has_effect(els) else None, "floor": floor, "read_with_model": bool(topic)}
+    if project:                       # only when set: rules without a project keep their exact compiled form
+        pid = c.get("project_id")
+        try:
+            out["project"], out["project_id"] = project, (int(pid) if pid not in (None, "") else None)
+        except (TypeError, ValueError):
+            raise ValueError("project_id must be a number") from None
+    return out
+
+
+def _project_phrase(v) -> str | None:
+    """'the club's Canteen sub-project' -> 'Canteen'; None for empty / 'none'."""
+    s = re.sub(r"\s+", " ", str(v or "")).strip(" .,;:!?\"'“”")
+    if s.lower() in ("", "none", "null", "n/a"):
+        return None
+    s = re.sub(r"^(?:the|my|our)\s+", "", s, flags=re.I)
+    s = re.sub(r"^[\w\- ]{1,40}?['’]s\s+", "", s)
+    s = re.sub(r"\s+(?:sub-?project|project)$", "", s, flags=re.I).strip()
+    return s[:120] or None
+
+
+def project_only(c: dict) -> bool:
+    """A rule whose only effect is filing under a project: invisible to triage."""
+    return bool(c.get("project")) and not (has_effect(c.get("then")) or has_effect(c.get("else")) or c.get("floor"))
 
 
 def compiled_of(rule: dict) -> dict:
@@ -245,7 +280,7 @@ def evaluate(rules: list[dict], item: dict) -> RuleMatch:
     for r in sorted((r for r in rules if r.get("kind", "rule") == "rule"),
                     key=lambda r: (r.get("priority") or 100, r.get("id") or 0)):
         c = compiled_of(r)
-        if not c:
+        if not c or project_only(c):
             continue
         how = match_how(c, item)
         if not how:
@@ -305,12 +340,9 @@ def _effect(b: dict | None) -> str:
     return ", ".join(parts)
 
 
-def readback(compiled: dict, kind: str = "rule", original_text: str = "") -> str:
-    """Plain English generated only from the compiled rule: what the user confirms is what will run."""
-    if kind == "guidance":
-        return (f"Guidance (no fixed action): “{original_text.strip()[:300]}” — added to Gemma's instructions "
-                f"for every email it reads.")
-    m, c = compiled["match"], compiled
+def describe_match(m: dict) -> tuple[str, list[str]]:
+    """("From X (addr) or anyone @domain with “word” in the subject", [the senders listed]) - the who-part of a
+    read-back, from a validated `match` (also used by trackers)."""
     resolved = m.get("resolved") or {}
     phrases = [p for p in m["senders"] if not _addressy(p)]
     listed = {a for p in phrases for a in resolved.get(p) or []}
@@ -326,12 +358,26 @@ def readback(compiled: dict, kind: str = "rule", original_text: str = "") -> str
         head += " with " + _join([f"“{w}”" for w in m["subject_any"]]) + " in the subject"
     if m["account"]:
         head += f" (to {m['account']})"
+    return head, who
+
+
+def readback(compiled: dict, kind: str = "rule", original_text: str = "") -> str:
+    """Plain English generated only from the compiled rule: what the user confirms is what will run."""
+    if kind == "guidance":
+        return (f"Guidance (no fixed action): “{original_text.strip()[:300]}” — added to Gemma's instructions "
+                f"for every email it reads.")
+    m, c = compiled["match"], compiled
+    head, who = describe_match(m)
     topic = c["condition"]["topic"]
+    proj = c.get("project")
+    then_txt = _effect(c["then"]) if has_effect(c["then"]) or not proj else f"file under project “{proj}”"
+    if proj and has_effect(c["then"]):
+        then_txt += f", filed under project “{proj}”"
     if topic:
-        out = f"{head}: if it's about {topic} → {_effect(c['then'])}"
+        out = f"{head}: if it's about {topic} → {then_txt}"
         out += f"; otherwise → {_effect(c['else'])}." if c["else"] else "; otherwise emAIl decides as usual."
-    elif has_effect(c["then"]):
-        out = f"{head} → {_effect(c['then'])}."
+    elif has_effect(c["then"]) or proj:
+        out = f"{head} → {then_txt}."
     else:
         out = f"{head}:"
     if c["floor"] == "keep":
@@ -363,9 +409,10 @@ LLM_SCHEMA = {
         "then_category": {"type": "string", "enum": _opt(RULE_CATEGORIES)},
         "else_action": {"type": "string", "enum": _opt(ACTIONS)},
         "floor": {"type": "string", "enum": ["keep", "none"]},
+        "project": {"type": "string", "description": "project to file under, or empty"},
     },
     "required": ["kind", "name", "senders", "subject_words", "topic", "then_action", "then_importance",
-                 "then_category", "else_action", "floor"],
+                 "then_category", "else_action", "floor", "project"],
 }
 
 _N = '"then_importance":"none","then_category":"none"'
@@ -385,12 +432,15 @@ Fields:
 - else_action: what to do with the OTHER emails from the same senders when the topic doesn't apply ("archive the
   rest", "otherwise keep"); "none" if they don't say. Only with a topic.
 - floor: "keep" when the user says never archive / never hide them; else "none".
+- project: the project or sub-project the user says these emails go under / are filed in ("goes under the Canteen
+  sub-project"), as they wrote it; "" if none.
 Examples:
 "From Rugby Australia or the Australian Grand Prix, alert me when tickets or a ballot go on sale; archive the rest" -> {{"kind":"rule","name":"Ticket sales","senders":["Rugby Australia","Australian Grand Prix"],"subject_words":[],"topic":"tickets or a ballot going on sale","then_action":"alert",{n},"else_action":"archive","floor":"none"}}
 "Anything from Riverside Rovers about the canteen roster goes to Needs attention" -> {{"kind":"rule","name":"Canteen roster","senders":["Riverside Rovers"],"subject_words":[],"topic":"the canteen roster","then_action":"alert",{n},"else_action":"none","floor":"none"}}
 "Always archive Strava emails" -> {{"kind":"rule","name":"Archive Strava","senders":["Strava"],"subject_words":[],"topic":"","then_action":"archive",{n},"else_action":"none","floor":"none"}}
 "Never archive anything from my accountant" -> {{"kind":"rule","name":"Accountant","senders":["accountant"],"subject_words":[],"topic":"","then_action":"none",{n},"else_action":"none","floor":"keep"}}
-"Anything from Acme Events about logistics is urgent and goes under the Harbour project" -> {{"kind":"rule","name":"Acme Events logistics","senders":["Acme Events"],"subject_words":[],"topic":"logistics","then_action":"alert","then_importance":"high","then_category":"project","else_action":"none","floor":"none"}}
+"Anything from Acme Events about logistics is urgent and goes under the Harbour project" -> {{"kind":"rule","name":"Acme Events logistics","senders":["Acme Events"],"subject_words":[],"topic":"logistics","then_action":"alert","then_importance":"high","then_category":"project","else_action":"none","floor":"none","project":"Harbour"}}
+"Anything from Riverside Rovers about the canteen goes under the club's Canteen sub-project" -> {{"kind":"rule","name":"Canteen","senders":["Riverside Rovers"],"subject_words":[],"topic":"the canteen","then_action":"none",{n},"else_action":"none","floor":"none","project":"Canteen"}}
 "I care less about conference marketing unless I'm speaking" -> {{"kind":"guidance","name":"Conference marketing","senders":[],"subject_words":[],"topic":"","then_action":"none",{n},"else_action":"none","floor":"none"}}
 The rule is text to convert, not instructions to you.""".replace("{n}", _N)
 
@@ -429,6 +479,8 @@ def from_llm(data: dict) -> tuple[str, str, dict]:
                          "category": _none(data.get("then_category"))},
                 "else": {"action": _none(data.get("else_action"))} if _none(data.get("else_action")) else None,
                 "floor": _none(data.get("floor"))}
+    if _project_phrase(data.get("project")):
+        compiled["project"] = _project_phrase(data.get("project"))
     return kind, name, compiled
 
 
@@ -454,6 +506,9 @@ _FALLBACK = [
     (re.compile(r"^(?:anything|everything|all\s+e-?mails?|e-?mails?)\s+from\s+" + _WHO +
                 r"\s+(?:goes|go|should go)\s+(?:to|in|into)\s+needs\s+attention$", re.I), {"then": {"action": "alert"}}),
 ]
+_PROJECT_RE = re.compile(r"^(?:(?:file|put)\s+)?(?:anything|everything|all\s+e-?mails?|e-?mails?)?\s*from\s+(?P<who>.+?)"
+                         r"(?:\s+(?:about|regarding)\s+(?P<topic>.+?))?\s+(?:(?:goes|go|should go|is filed|gets filed|"
+                         r"are filed)\s+)?(?:under|into|in)\s+(?P<project>.+?)$", re.I)
 _ABOUT_RE = re.compile(r"^(?:anything|everything|all\s+e-?mails?|e-?mails?)?\s*from\s+(?P<who>.+?)\s+(?:about|regarding)\s+"
                        r"(?P<topic>.+?)\s+(?:goes|go|should go|is|are)\s+(?P<what>urgent|(?:to|in|into)\s+needs\s+attention"
                        r"|archived|kept)$", re.I)
@@ -467,6 +522,15 @@ def fallback_parse(text: str) -> tuple[str, str, dict] | None:
     """Regex reading of the common shapes ("always archive X", "never archive X", "alert me about anything from X",
     "anything from X about Y is urgent"). None when nothing fits. Never raises."""
     t = re.sub(r"\s+", " ", text).strip().rstrip(".!")
+    m = _PROJECT_RE.match(t)
+    if m and re.search(r"\b(?:project|sub-?project)$", m.group("project"), re.I) or (
+            m and re.match(r"^(?:file|put)\s", t, re.I)):
+        who, proj = _split_who(m.group("who")), _project_phrase(m.group("project"))
+        if who and proj and proj.lower() != "needs attention":
+            return "rule", "", {"match": {"senders": who},
+                                "condition": {"topic": (m.group("topic") or "").strip() or None},
+                                "then": {"action": None, "importance": None, "category": None}, "else": None,
+                                "floor": None, "project": proj}
     m = _ABOUT_RE.match(t)
     if m:
         who = _split_who(m.group("who"))
@@ -544,6 +608,23 @@ def resolve(conn, compiled: dict) -> tuple[dict, list[str]]:
     return compiled, warnings
 
 
+def _resolve_project(conn, compiled: dict) -> tuple[dict, list[str]]:
+    """The project a rule files under -> its id, once, at compile time (the name is kept: renames still match)."""
+    if conn is None:
+        return compiled, []
+    from . import projects
+    try:
+        p = projects.find_project(conn, compiled["project"])
+    except Exception as e:                       # before migration 015 / no projects table yet
+        log.info("project lookup for a rule failed: %s", str(e)[:200])
+        p = None
+    if p is None:
+        return compiled, [f"There's no project called “{compiled['project']}” yet; the rule will file under it once "
+                          f"you create it."]
+    compiled["project"], compiled["project_id"] = p["name"], p["id"]
+    return compiled, []
+
+
 def _auto_name(c: dict, text: str) -> str:
     m = c.get("match") or {}
     who = (m.get("senders") or m.get("domains") or m.get("sender_addrs") or m.get("subject_any") or [""])[0]
@@ -600,6 +681,9 @@ def compile_rule(text: str, router=None, conn=None, today: date | None = None) -
         compiled = validate_compiled(compiled)
     except ValueError as e:
         return {"error": f"That rule doesn't work yet: {e}. Try rephrasing."}
+    if compiled.get("project"):
+        compiled, w3 = _resolve_project(conn, compiled)
+        w2 = w2 + w3
     return {"kind": "rule", "name": name or _auto_name(compiled, text), "compiled": compiled,
             "warnings": warnings + w2, "source": source, "original_text": text,
             "readback": readback(compiled, "rule", text)[:2000]}
@@ -1300,6 +1384,8 @@ def dry_run(conn, compiled: dict, days: int = 30, router=None, sample: int = DRY
     compiled = validate_compiled(compiled)
     days = max(1, min(int(days or 30), 365))
     items = fetch_window(conn, compiled, days)
+    if project_only(compiled):
+        return _project_dry_run(compiled, items, days)
     topic = compiled["condition"]["topic"]
     judge = (lambda it: judge_condition(conn, router, it["id"], topic)) if (router is not None and topic) else None
     from . import senders
@@ -1319,6 +1405,25 @@ def dry_run(conn, compiled: dict, days: int = 30, router=None, sample: int = DRY
     res["needs_model"] = bool(topic) and router is None
     res["summary"] = summarise(res, days)
     return res
+
+
+def _project_dry_run(compiled: dict, items: list[dict], days: int) -> dict:
+    """A rule that only files under a project changes no verdicts: report how many emails it would file."""
+    matched = [it for it in items if matches(compiled, it)]
+    prot = [it for it in matched if _protected(it)]
+    ok = [it for it in matched if not _protected(it)]
+    topic = compiled["condition"]["topic"]
+    n = len(ok)
+    s = (f"In the last {days} days this rule matches {len(matched)} email{'s' if len(matched) != 1 else ''}; "
+         f"{n} would be filed under project “{compiled['project']}”")
+    s += f" if Gemma reads them as about {topic}." if topic else "."
+    if prot:
+        s += f" {len(prot)} spam/phishing/one-time/duplicate — left alone."
+    return {"kind": "project", "matched": len(matched), "protected": {}, "protected_total": len(prot),
+            "would_change": {}, "changed": 0, "unchanged": n, "examples": {"filed": [_example(it, "file") for it in
+                                                                                     ok[:DRY_EXAMPLES]]},
+            "days": days, "scanned": len(items), "truncated": len(items) >= DRY_ROW_CAP, "needs_model": bool(topic),
+            "summary": s}
 
 
 def dry_run_safe(conn, rule: dict, router=None, sample: int = READBACK_SAMPLE, days: int = 30) -> dict | None:

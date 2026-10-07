@@ -304,6 +304,85 @@ emaild rule suggest --dismiss 3       # never suggest it again
 
 Suggestions work per address, or per organisation domain when two or more of its addresses agree (never for free-mail domains). Senders with security, spam or one-time verdicts are never suggested. Suggestions refresh at most once a day and need no model. They show on the web Rules page (Save / Not now / Never), in Telegram (`/suggestrules`, ✅ Save / ✖ Never), in MCP (`rule_suggestions`, `accept_rule_suggestion`, `dismiss_rule_suggestion`), and as a 💡 line in the morning brief.
 
+## 13. Trackers (F5)
+
+Apply migration 014 first: `emaild migrate`. Nothing changes until you save a tracker.
+
+A tracker turns a kind of email into a board: one row per order, service or event, with its current state. You're told only about the changes that matter. Like rules, you say it in your own words, emAIl reads it back with what it would have found in the last 90 days, and it only runs once you save it.
+
+```bash
+emaild tracker add "Track my Acme Shop orders"
+#  [12] Acme Shop orders  (orders, waiting for you to confirm, v1)
+#       📦 Acme Shop orders — From Acme Shop (orders@acmeshop.example.com) or anyone @acmeshop.example.com.
+#       One row per order: ordered → shipped → out for delivery → delivered (also delayed, problem, return
+#       started, cancelled or refunded). Tells you (Telegram) when it's ordered, shipped, delayed, problem or
+#       cancelled; out for delivery, delivered, return started and refunded just update the board. ...
+#       In the last 90 days this matches 14 emails. Gemma read the newest 8: 4 orders (3 delivered, 1 shipped);
+#       about 7 orders in all.
+#  Save this tracker? [y/N]
+emaild tracker add "Track Example VPN and Example CDN status; Example VPN reports every day" --yes
+emaild tracker add "From NSFC, tell me when tickets or a ballot go on sale"
+emaild tracker add "Track my orders"                 # any sender: order/shipping words in the subject
+emaild tracker add "Track my permit application from the Example Council: lodged, in review, approved or refused"
+emaild trackers                                      # the boards
+emaild tracker show acme                             # an id or a few words; finished items too
+emaild tracker off 12 · emaild tracker on 12 · emaild tracker rm 12
+emaild tracker test 12                               # or: emaild tracker test "Track my Acme Shop orders"
+emaild tracker suggest                               # recurring order/status mail nothing tracks yet
+emaild ask "what's still in transit?"                # answered from the boards
+```
+
+The same works on the web (Trackers page: add box, boards with Pause / Resume / Delete / Test, finished items folded away; a line on the Status panel such as "📦 3 in transit · 🟢 all services up · 🎟 1 on sale Fri"), in Telegram (`/track …` with ✅ Save / ✖ Cancel, `/trackers`, `/tracker off 12`, or just *"track my Acme Shop orders"*, *"is everything up?"*) and over MCP (`create_tracker` → `confirm_tracker`, `trackers`, `tracker_items`).
+
+How trackers run:
+- The worker reads matching emails after triage, so spam, phishing and one-time codes are never read by a tracker. Each email is read once per tracker (one small Gemma call), at most 30 per cycle; a new tracker fills its board from the last 30 days over the next cycles, quietly (only emails from the last 48 hours notify).
+- States only move forward (a late "shipped" email can't undo "delivered"); delays, problems, cancellations, returns and refunds apply at any time. Repeats ("still up") only refresh "last heard".
+- Notifications go to Telegram outside quiet hours and not while muted: orders on ordered / shipped / delayed / problem / cancelled; services on every change, with a "recovered" note; on-sale on presale / general sale / cancelled, plus a reminder on the morning of each sale date. Say "tell me when they're delivered too" or "don't tell me about maintenance" to change that.
+- Finished items leave the board (delivered orders after 7 days; refunded at once; sold-out events after 7 days) but stay in history (`tracker show`, MCP `tracker_items(include_closed=true)`). Orders shipped 9+ days ago without a delivery update are flagged *stalled*.
+- Status-only emails a tracker has captured (shipping updates, service status) may have emAIl's *open* proposal changed from keep to archive ("Captured by tracker …"). Never order confirmations, on-sale emails, alerts, reviewed decisions, decisions made by your own rules, or personal mail.
+- The morning brief gets a 📋 Trackers section: one line per tracker with changes since the last brief, and sales opening today or tomorrow.
+
+## 14. Projects (Phase 3, slice 1)
+
+Apply migration 015 first: `emaild migrate`. Nothing changes until you save a project.
+
+A project groups the mail of something you're involved in. An **umbrella** is an ongoing involvement that never finishes (a club committee, the household, a role) and usually matches broadly ("everything from nsfc.example.org"). A **sub-project** is a goal with an end inside it ("Presentation night", "Uniform order"). emAIl files the matching emails, notes the decisions, asks of you, commitments, deadlines and open questions in them (each citing its email), and answers "where are we with …?". Like rules and trackers, you say it in your own words, emAIl reads it back with what it would have filed in the last 90 days, and it only runs once you save it.
+
+```bash
+emaild project add "Create a project for the NSFC committee, everything from nsfc.example.org"
+#  [5] NSFC committee  (umbrella, waiting for you to save it)
+#       🗂 NSFC committee — an ongoing umbrella (never “finishes”; add sub-projects for goals with an end). Files
+#       emails: from anyone @nsfc.example.org. Gemma sorts its emails into your sub-projects; the rest stays here as
+#       general business. ...
+#       In the last 90 days 41 emails would be filed here (2 spam/phishing/one-time left out).
+#  Save this project? [y/N]
+emaild project add "Add a sub-project under NSFC: presentation night" --yes
+#       Of 41 NSFC committee emails in the last 90 days, Gemma read the newest 8: 3 look like Presentation night
+#       (about 15 in all).
+emaild project add "Track my kitchen renovation with the builder at builder.example.com"
+emaild project add --item 501 --under NSFC "make this thread a sub-project of NSFC"   # start from a thread
+emaild projects                                  # umbrellas and sub-projects: open asks, next date, last activity
+emaild project status NSFC                       # sub-project one-liners, general business, dates, who's waiting
+emaild project status "presentation night"       # asks of you, deadlines, commitments, decisions, open questions
+emaild project facts NSFC --type deadline        # every fact with the email it came from
+emaild project link 501 "presentation night"     # file one email by hand (its thread's later replies follow)
+emaild project move "uniform order" --under NSFC · emaild project done "presentation night"
+emaild project archive NSFC · emaild project rm NSFC · emaild project suggest
+emaild thread-status 501                         # where any thread stands (or: emaild thread-status "hall booking")
+emaild ask "where are we with the kitchen renovation?"
+```
+
+A rule can file too: `emaild rule add "Anything from Riverside Rovers about the canteen goes under the club's Canteen sub-project"` (the read-back says “→ file under project “Canteen””; a rule whose only effect is filing never changes triage).
+
+The same works on the web (Projects page with an add box and suggested sub-projects; a detail page per project with open facts linked to their emails, timeline, waiting-on, an on-demand Overview, Done / Archive / Move / Delete; "Add to project" and "Thread status" on every email; a Status-panel line such as "🗂 3 projects · 5 open asks · next: Presentation night Fri"), in Telegram (`/project add …` with ✅ Save / ✖ Cancel, `/projects`, `/project NSFC`, or just *"status of presentation night"*) and over MCP (`create_project` → `confirm_project`, `list_projects`, `project_status`, `project_facts`, `link_to_project`, `thread_status`, `set_project_status`).
+
+How projects run:
+- The worker files after triage and trackers, so spam, phishing, one-time codes and security-held mail are never filed or read. Step 1 is deterministic: a thread already filed keeps its new messages (your replies too), a rule's project action, a sub-project's own match, or the umbrella's match. Step 2: Gemma picks which of that umbrella's open sub-projects an email is about, from a closed list — or none (it stays as general business), or *new*, which only becomes a suggestion you can accept.
+- Each filed email gets one small Gemma call for its facts. Repeats are dropped; a later email can close an ask, question, commitment or deadline. Model calls are capped at 30 per user per worker cycle (filing and facts share it); a new project files the last 90 days over the next cycles, and those older facts never show as "new" in the brief.
+- The morning brief gets a 🗂 Projects section: new facts since the last brief (asks of you and deadlines first) and dates in the next 7 days.
+- Status is built on demand from the facts, the timeline and who wrote last in each conversation. The optional overview is written by Gemma from the facts only, never from raw email. Every email's content is treated as untrusted in every prompt.
+- Coming in slice 2: a linked Obsidian note per project.
+
 ## Troubleshooting
 
 | Symptom | Fix |

@@ -1,0 +1,63 @@
+{% macro status_label(p) -%}
+{%- if p.status == 'active' %}on{% elif p.status == 'pending' %}not saved yet{% else %}{{ p.status }}{% endif -%}
+{%- endmacro %}
+
+{% macro card(top) %}
+<div class="card project" id="pc{{ top.id }}">
+  <div class="top"><span class="subj">{{ '🗂' if top.kind == 'umbrella' else '📁' }}
+    <a href="/projects/{{ top.id }}">{{ top.name }}</a></span>
+    <span class="chip{% if top.status == 'active' %} on{% endif %}">{{ status_label(top) }}</span>
+    <span class="from">{{ top.line }}</span></div>
+  {% if top.children %}
+  <table>
+    <tr><th>Sub-project</th><th>Status</th><th>Open</th><th>Next</th><th>Last activity (UTC)</th></tr>
+    {% for k in top.children %}
+    <tr><td><a href="/projects/{{ k.id }}">📁 {{ k.name }}</a></td>
+        <td><span class="chip{% if k.status == 'active' %} on{% endif %}">{{ status_label(k) }}</span></td>
+        <td>{{ k.open }}{% if k.asks %} <span class="s">({{ k.asks }} ask{{ 's' if k.asks != 1 }} of you)</span>{% endif %}</td>
+        <td class="s">{{ k.next }}</td>
+        <td class="s">{{ k.last_activity_at or '—' }}</td></tr>
+    {% endfor %}
+  </table>
+  {% elif top.kind == 'umbrella' %}
+  <p class="muted" style="font-size:13px;margin:6px 0 0">No sub-projects yet — add one below (“Add a sub-project under {{ top.name }}: …”).</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro proposal(p) %}
+<div class="card" id="pr{{ p.id }}">
+  <div class="top"><span class="subj">Project #{{ p.id }}: {{ p.name }}</span>
+    {% if p.parent_name %}<span class="from">under {{ p.parent_name }}</span>{% endif %}
+    <span class="chip">not saved yet</span></div>
+  <p style="margin:8px 0">{{ p.readback }}</p>
+  {% for w in p.warnings or [] %}<div class="err">⚠ {{ w }}</div>{% endfor %}
+  {% if p.dry_run and p.dry_run.summary %}
+  <div class="dry s" style="margin-top:6px"><div>🔍 {{ p.dry_run.summary }}</div>
+    {% for e in (p.dry_run.examples or [])[:4] %}<div class="muted" style="font-size:13px">· {{ e.date }} {{ e.sender }} — {{ e.subject }}</div>{% endfor %}</div>
+  {% endif %}
+  <div class="row">
+    <button class="btn" hx-post="/projects/{{ p.id }}/confirm" hx-target="#pr{{ p.id }}" hx-swap="outerHTML">✅ Save</button>
+    <button class="btn ghost" hx-post="/projects/{{ p.id }}/cancel" hx-target="#pr{{ p.id }}" hx-swap="outerHTML">✖ Cancel</button>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro fact(f) %}
+<div class="li">{{ f.text }}{% if f.owner and f.owner != 'me' and f.type in ('commitment', 'deadline') %} <span class="s">— {{ f.owner }}</span>{% endif %}
+  {% if f.due %}<span class="chip{% if f.overdue %} alert{% endif %}">{{ 'overdue · ' if f.overdue }}due {{ f.due_label }}</span>{% endif %}
+  {% if f.where %}<span class="s">· {{ f.where }}</span>{% endif %}
+  {% if f.item_id %}<a class="s" href="/item/{{ f.item_id }}" title="The email this came from">email {{ f.item_id }}</a>{% endif %}</div>
+{% endmacro %}
+
+{% macro suggestion(sg) %}
+<div class="li reco" id="ps{{ sg.id }}">
+  <div class="who"><b>💡 {{ sg.parent }} / {{ sg.name }}</b> <span class="chip">suggested sub-project</span>
+    <div class="s muted">{{ sg.evidence }}</div></div>
+  <div class="row">
+    <button class="btn" hx-post="/projects/suggestions/{{ sg.id }}/accept" hx-target="#ps{{ sg.id }}" hx-swap="outerHTML">Create</button>
+    <button class="btn ghost" type="button" onclick="this.closest('.li').remove()">Not now</button>
+    <button class="btn ghost" hx-post="/projects/suggestions/{{ sg.id }}/dismiss" hx-target="#ps{{ sg.id }}" hx-swap="outerHTML">Never</button>
+  </div>
+</div>
+{% endmacro %}

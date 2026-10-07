@@ -45,6 +45,17 @@ HELP = ("<b>emAIl</b> — your inbox, without the inbox.\n\n"
         "/rule guidance: I care less about conference marketing unless I'm speaking — soft guidance for the model\n"
         "/rule test 3 — what rule 3 would have done to the last 30 days (or /rule test &lt;new rule in words&gt;)\n"
         "/suggestrules — rules emAIl suggests from your reviews (✅ Save / ✖ Never)\n"
+        "/track Track my Acme Shop orders — a tracker in plain words: a board of orders, services or ticket sales "
+        "that only tells you about the changes that matter (read back to you; ✅ Save turns it on)\n"
+        "/trackers — your boards · /tracker off 2 · /tracker on 2 · /tracker rm 2 · /tracker show 2 · "
+        "/tracker test 2\n"
+        "\"what's still in transit?\" · \"is everything up?\" — answered from your trackers\n"
+        "/project add Create a project for the NSFC committee, everything from nsfc.example.org — a project in plain "
+        "words (read back to you; ✅ Save turns it on). Sub-projects: /project add Add a sub-project under NSFC: "
+        "presentation night\n"
+        "/projects — your projects · /project NSFC — where it stands · /project done|archive|rm NSFC\n"
+        "\"status of presentation night\" · \"where are we with the kitchen renovation?\" — a project's status, or "
+        "any thread's\n"
         "Anything else you type is a question about your email, e.g. \"last 5 emails from Matt\" (a list) or "
         "\"what are the latest perks from JB Hi-Fi?\" (an answer).")
 
@@ -156,6 +167,22 @@ def render_card(g: dict, detail: str) -> str:
     return "\n".join(out)
 
 
+def render_alert(g: dict, detail: str) -> str:
+    """A new alert, written so you know what the email says without opening it: subject, sender, the content
+    summary. The 'why' only appears at the full detail level."""
+    if detail == "minimal":
+        return f"🔔 <b>New alert</b> from {html.escape(g['sender'])}"
+    out = [f"🔔 <b>{html.escape(g['subject'] or '(no subject)')}</b>", f"from {html.escape(g['sender'])}"]
+    summary = (g.get("summary") or "").strip()
+    if summary and summary != g.get("subject"):
+        out.append(html.escape(summary[:400]))
+    if detail == "full" and g.get("reasons"):
+        out.append(f"<i>Why: {html.escape(g['reasons'][:200])}</i>")
+    if g.get("first_contact"):
+        out.append("⚠️ First email from this address — be careful with links, payments and requests.")
+    return "\n".join(out)
+
+
 def card_buttons(decision_id: int, chain: bool, item_url: str | None, seen: bool = False) -> dict:
     sfx = ":r" if chain else ""
     rows = [[{"text": "✅ Right", "callback_data": f"v:a:{decision_id}{sfx}"},
@@ -259,6 +286,109 @@ def render_rules_list(rows: list[dict]) -> tuple[str, dict | None]:
         row.append({"text": f"🗑 Delete #{r['id']}", "callback_data": f"r:d:{r['id']}"})
         kb.append(row)
     return "\n".join(lines)[:3900], {"inline_keyboard": kb}
+
+
+TRACKER_STATUS = {"pending": "⏳ waiting for you", "active": "✅ on", "paused": "⏸ off", "deleted": "🗑 deleted"}
+TONE_DOT = {"good": "🟢", "warn": "🟠", "bad": "🔴", "info": "⚪"}
+
+
+def render_tracker_proposal(t: dict, dry: dict | None = None) -> str:
+    """Read-back of a newly compiled tracker (generated from the compiled form), with its 90-day dry run."""
+    v = f" (v{t['version']})" if t.get("version", 1) > 1 else ""
+    out = [f"📋 <b>Tracker #{t['id']}{v}: {html.escape(t.get('name') or '')}</b>", html.escape(t.get("readback") or "")]
+    out += [f"⚠️ {html.escape(w)}" for w in t.get("warnings") or []]
+    if dry:
+        out.append(f"🔍 <i>{html.escape(dry.get('summary') or '')}</i>")
+        out += [f"• {html.escape(e['title'][:80])}: {html.escape(e['state'].replace('_', ' '))}"
+                for e in (dry.get("examples") or [])[:3]]
+    out.append("Save it?")
+    return "\n".join(out)[:3900]
+
+
+def tracker_proposal_buttons(tracker_id: int) -> dict:
+    return {"inline_keyboard": [[{"text": "✅ Save", "callback_data": f"t:y:{tracker_id}"},
+                                 {"text": "✖ Cancel", "callback_data": f"t:n:{tracker_id}"}]]}
+
+
+def render_boards(boards: list[dict], per_board: int = 8) -> tuple[str, dict | None]:
+    """Compact boards: one block per tracker, a line per open item (state dot, title, state, date, stalled)."""
+    if not boards:
+        return ("No trackers yet. Try <code>/track Track my Acme Shop orders</code>", None)
+    lines, kb = ["<b>Your trackers</b>"], []
+    for b in boards[:10]:
+        t = b["tracker"]
+        lines.append(f"\n{b['icon']} <b>#{t['id']} {html.escape(t.get('name') or '')}</b> · "
+                     f"{TRACKER_STATUS.get(t['status'], '')}")
+        for it in b["open"][:per_board]:
+            ln = f"{TONE_DOT.get(it['tone'], '⚪')} {html.escape((it.get('title') or '')[:60])} — {html.escape(it['label'])}"
+            if it.get("when"):
+                ln += f" · {html.escape(it['when'])}"
+            if it.get("stalled"):
+                ln += f" ⚠ {html.escape(it['stalled'])}"
+            lines.append(ln)
+        if len(b["open"]) > per_board:
+            lines.append(f"…and {len(b['open']) - per_board} more")
+        if not b["open"] and t["status"] == "active":
+            lines.append("<i>nothing on the board yet</i>")
+        if b.get("closed"):
+            lines.append(f"<i>{len(b['closed'])} finished</i>")
+        row = []
+        if t["status"] == "pending":
+            row.append({"text": f"✅ Save #{t['id']}", "callback_data": f"t:y:{t['id']}"})
+        elif t["status"] == "active":
+            row.append({"text": f"⏸ Pause #{t['id']}", "callback_data": f"t:p:{t['id']}"})
+        elif t["status"] == "paused":
+            row.append({"text": f"▶ Resume #{t['id']}", "callback_data": f"t:o:{t['id']}"})
+        row.append({"text": f"🗑 Delete #{t['id']}", "callback_data": f"t:d:{t['id']}"})
+        kb.append(row)
+    return "\n".join(lines)[:3900], {"inline_keyboard": kb}
+
+
+def render_project_proposal(p: dict, dry: dict | None = None) -> str:
+    """Read-back of a newly compiled project (generated from the compiled form), with its 90-day dry run."""
+    under = f" (under {html.escape(p['parent_name'])})" if p.get("parent_name") else ""
+    out = [f"🗂 <b>Project #{p['id']}: {html.escape(p.get('name') or '')}</b>{under}",
+           html.escape(p.get("readback") or "")]
+    out += [f"⚠️ {html.escape(w)}" for w in p.get("warnings") or []]
+    if dry and dry.get("summary"):
+        out.append(f"🔍 <i>{html.escape(dry['summary'])}</i>")
+    out.append("Save it?")
+    return "\n".join(out)[:3900]
+
+
+def project_proposal_buttons(project_id: int) -> dict:
+    return {"inline_keyboard": [[{"text": "✅ Save", "callback_data": f"p:y:{project_id}"},
+                                 {"text": "✖ Cancel", "callback_data": f"p:n:{project_id}"}]]}
+
+
+def render_projects(rows: list[dict]) -> str:
+    """Umbrellas with their sub-projects, one line each (open asks, next date, last activity)."""
+    from . import projects
+    if not rows:
+        return ("No projects yet. Try <code>/project add Create a project for the NSFC committee, everything from "
+                "nsfc.example.org</code>")
+    lines = ["<b>Your projects</b>"]
+    for top in rows[:15]:
+        icon = "🗂" if top["kind"] == "umbrella" else "📁"
+        st = "" if top["status"] == "active" else f" · {html.escape(projects.status_text(top))}"
+        lines.append(f"\n{icon} <b>{html.escape(top['name'])}</b>{st} — {html.escape(top['line'])}")
+        for k in top["children"][:12]:
+            st = "" if k["status"] == "active" else f" ({html.escape(projects.status_text(k))})"
+            lines.append(f"  📁 {html.escape(k['name'])}{st} — {html.escape(k['line'])}")
+    return "\n".join(lines)[:3900]
+
+
+def render_status_text(lines: list[str]) -> str:
+    """Status lines (plain text) for Telegram: escaped, the first line bold, '[email 12]' citations kept as text
+    (raw email never goes to Telegram)."""
+    if not lines:
+        return ""
+    return ("<b>" + html.escape(lines[0]) + "</b>\n" + "\n".join(html.escape(x) for x in lines[1:]))[:3900]
+
+
+def render_tracker_suggestion(sg: dict) -> str:
+    return (f"💡 <b>{html.escape(sg.get('label') or '')}</b>\n“{html.escape(sg['text'])}”\n"
+            f"{html.escape(sg.get('readback') or '')}\n<i>Why: {html.escape(sg.get('evidence') or '')}</i>")[:3900]
 
 
 def _short_date(iso: str) -> str:
@@ -556,6 +686,262 @@ class Bot:
                 return
         self.api.send(chat_id, msg)
 
+    # ----- trackers (F5) -----
+    def create_tracker(self, link: dict, text: str) -> None:
+        from . import trackers
+        from .llm.router import Router
+        text = text.strip()
+        if not text:
+            self.api.send(link["chat_id"], "Use: <code>/track Track my Acme Shop orders</code>")
+            return
+        self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        router = Router()
+        with db.user_session(link["ctx"]) as conn:
+            t = trackers.create(conn, text, router, actor="telegram")
+            dry = None if t.get("error") else trackers.dry_run_safe(conn, t, router)
+        if t.get("error"):
+            self.api.send(link["chat_id"], html.escape(t["error"]))
+            return
+        self.api.send(link["chat_id"], render_tracker_proposal(t, dry), tracker_proposal_buttons(t["id"]))
+
+    def send_trackers(self, link: dict) -> None:
+        from . import trackers
+        with db.user_session(link["ctx"]) as conn:
+            boards = trackers.boards(conn)
+            sugg = trackers.list_suggestions(conn, key=link["ctx"].user_id)
+        text, kb = render_boards(boards)
+        self.api.send(link["chat_id"], text, kb)
+        for sg in sugg[:3]:
+            self.api.send(link["chat_id"], render_tracker_suggestion(sg),
+                          {"inline_keyboard": [[{"text": "✅ Track", "callback_data": f"ts:y:{sg['id']}"},
+                                                {"text": "✖ Never", "callback_data": f"ts:n:{sg['id']}"}]]})
+
+    def tracker_command(self, link: dict, arg: str) -> None:
+        """/tracker off|on|rm|show|test <ref>; anything else is a new tracker in plain words."""
+        from . import trackers
+        chat_id = link["chat_id"]
+        sub, _, rest = arg.strip().partition(" ")
+        sub, rest = sub.lower(), rest.strip()
+        if sub not in ("off", "on", "rm", "delete", "show", "test", "pause", "resume"):
+            return self.create_tracker(link, arg)
+        if sub == "test":
+            from .llm.router import Router
+            self.api.call("sendChatAction", chat_id=chat_id, action="typing")
+            with db.user_session(link["ctx"]) as conn:
+                res = trackers.dry_run_ref(conn, rest, router=Router())
+            if res.get("error"):
+                self.api.send(chat_id, html.escape(res["error"]))
+                return
+            t = res["tracker"]
+            head = (f"🧪 <b>#{t['id']} {html.escape(t.get('name') or '')}</b>" if t.get("id") else
+                    f"🧪 <b>{html.escape(t.get('name') or '')}</b> (not saved)")
+            self.api.send(chat_id, f"{head}\n{html.escape(t.get('readback') or '')}\n🔍 <i>"
+                                   f"{html.escape(res['dry_run']['summary'])}</i>"[:3900])
+            return
+        with db.user_session(link["ctx"]) as conn:
+            t = trackers.find_tracker(conn, rest) if rest else None
+            if t is None:
+                self.api.send(chat_id, f"No tracker matches “{html.escape(rest)}” — see /trackers")
+                return
+            tid = t["id"]
+            if sub in ("off", "pause"):
+                msg = f"⏸ Tracker #{tid} paused" if trackers.set_enabled(conn, tid, False, actor="telegram") else \
+                    f"Tracker #{tid} is {trackers.status_text(t)}."
+            elif sub in ("on", "resume"):
+                ok = trackers.confirm(conn, tid, actor="telegram")["active"] if t["status"] == "pending" else \
+                    trackers.set_enabled(conn, tid, True, actor="telegram")
+                msg = f"▶ Tracker #{tid} is on" if ok else f"Tracker #{tid} is {trackers.status_text(t)}."
+            elif sub in ("rm", "delete"):
+                msg = f"🗑 Tracker #{tid} deleted" if trackers.delete(conn, tid, actor="telegram") else \
+                    "Already deleted."
+            else:
+                b = trackers.board(conn, tid)
+                text, _ = render_boards([b] if b else [], per_board=20)
+                msg = f"{text}\n\n{html.escape(t.get('readback') or '')}\n<i>Your words:</i> " \
+                      f"{html.escape(t.get('original_text') or '')}"
+        self.api.send(chat_id, msg[:3900])
+
+    def tracker_status(self, link: dict, kind: str, question: str = "") -> None:
+        """'what's still in transit?' / 'is everything up?' answered from the boards (no model call). Without a
+        tracker of that kind, the question goes to the normal email search instead."""
+        from . import trackers
+        with db.user_session(link["ctx"]) as conn:
+            ans = trackers.status_answer(conn, kind)
+        if ans.get("hint") and question:
+            return self.answer_question(link, question)
+        text = f"<b>{html.escape(ans['title'])}</b>"
+        text += "".join(f"\n• {html.escape(line)}" for line in ans["lines"])
+        if ans.get("hint"):
+            text += f"\nTry <code>/track {html.escape(ans['hint'])}</code>"
+        self.api.send(link["chat_id"], text[:3900])
+
+    def tracker_intent(self, link: dict, intent: dict, question: str = "") -> None:
+        if intent["op"] == "list":
+            return self.send_trackers(link)
+        if intent["op"] == "add":
+            return self.create_tracker(link, intent["text"])
+        return self.tracker_status(link, intent["kind"], question)
+
+    def _tracker_callback(self, q: dict, link: dict, op: str, tid: int) -> None:
+        from . import trackers
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if op == "y":
+                ok, label = trackers.confirm(conn, tid, actor="telegram")["active"], \
+                    f"✅ Tracker #{tid} saved and on"
+            elif op == "n":
+                t = trackers.get(conn, tid)
+                if t and t["version"] > 1:
+                    ok, label = True, f"✖ Not saved — tracker #{tid} stays off until you confirm it (/trackers)"
+                else:
+                    ok, label = trackers.delete(conn, tid, actor="telegram"), f"✖ Tracker #{tid} cancelled"
+            elif op == "p":
+                ok, label = trackers.set_enabled(conn, tid, False, actor="telegram"), f"⏸ Tracker #{tid} paused"
+            elif op == "o":
+                ok, label = trackers.set_enabled(conn, tid, True, actor="telegram"), f"▶ Tracker #{tid} on"
+            else:
+                ok, label = trackers.delete(conn, tid, actor="telegram"), f"🗑 Tracker #{tid} deleted"
+        if not ok:
+            self.api.call("answerCallbackQuery", callback_query_id=q["id"], text="Not found (or already done)")
+            return
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label[:190])
+        if op in ("y", "n"):
+            self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                          reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
+        else:
+            self.api.send(chat_id, html.escape(label), reply_to=msg_id)
+
+    def _tracker_suggestion_callback(self, q: dict, link: dict, op: str, sid: int) -> None:
+        from . import trackers
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if op == "y":
+                res = trackers.accept_suggestion(conn, sid, actor="telegram")
+                ok = not res.get("error")
+                label = f"✅ Tracking as #{res['tracker']['id']}" if ok else res["error"]
+            else:
+                ok = trackers.dismiss_suggestion(conn, sid, actor="telegram")
+                label = "✖ Won't suggest that again" if ok else "Not found (or already done)"
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label[:190])
+        if ok:
+            self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                          reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
+
+    # ----- projects (Phase 3) -----
+    def create_project(self, link: dict, text: str) -> None:
+        from . import projects
+        from .llm.router import Router
+        text = text.strip()
+        if not text:
+            self.api.send(link["chat_id"], "Use: <code>/project add Add a sub-project under NSFC: presentation "
+                                           "night</code>")
+            return
+        self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        router = Router()
+        with db.user_session(link["ctx"]) as conn:
+            p = projects.create(conn, text, router, actor="telegram")
+            dry = None if p.get("error") else projects.dry_run_safe(conn, p, router)
+        if p.get("error"):
+            self.api.send(link["chat_id"], html.escape(p["error"]))
+            return
+        self.api.send(link["chat_id"], render_project_proposal(p, dry), project_proposal_buttons(p["id"]))
+
+    def send_projects(self, link: dict) -> None:
+        from . import projects
+        with db.user_session(link["ctx"]) as conn:
+            rows = projects.overview_rows(conn)
+            sugg = projects.list_suggestions(conn)
+        self.api.send(link["chat_id"], render_projects(rows))
+        for sg in sugg[:3]:
+            self.api.send(link["chat_id"], f"💡 New sub-project under <b>{html.escape(sg['parent'])}</b>: "
+                                           f"“{html.escape(sg['name'])}”?\n<i>{html.escape(sg['evidence'])}</i>",
+                          {"inline_keyboard": [[{"text": "✅ Create", "callback_data": f"ps:y:{sg['id']}"},
+                                                {"text": "✖ Never", "callback_data": f"ps:n:{sg['id']}"}]]})
+
+    def project_status(self, link: dict, ref: str, question: str = "") -> None:
+        """A project's status (by name/alias/id), or - when nothing is called that - the best-matching thread's.
+        Before migration 015 a free-text question goes to the normal email search, as it always did."""
+        from . import projects
+        from .llm.router import Router
+        self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        with db.user_session(link["ctx"]) as conn:
+            res = projects.route_status(conn, ref, Router(), with_overview=True)
+        if res.get("unavailable") and question:
+            return self.answer_question(link, question)
+        if res.get("error"):
+            self.api.send(link["chat_id"], html.escape(res["error"]))
+            return
+        lines = (projects.status_lines(res["status"]) if res["kind"] == "project"
+                 else projects.thread_lines(res["status"]))
+        self.api.send(link["chat_id"], render_status_text(lines))
+
+    def project_command(self, link: dict, arg: str) -> None:
+        """/project add <text> · /project done|archive|rm|on <name> · /project <name> (status)."""
+        from . import projects
+        chat_id = link["chat_id"]
+        sub, _, rest = arg.strip().partition(" ")
+        sub, rest = sub.lower(), rest.strip()
+        if not arg.strip():
+            return self.send_projects(link)
+        if sub in ("add", "new", "create"):
+            return self.create_project(link, rest)
+        if sub not in ("done", "archive", "rm", "delete", "on", "reopen", "status"):
+            return self.project_status(link, arg.strip())
+        if sub == "status":
+            return self.project_status(link, rest)
+        with db.user_session(link["ctx"]) as conn:
+            p = projects.find_project(conn, rest) if rest else None
+            if p is None:
+                self.api.send(chat_id, f"No project matches “{html.escape(rest)}” — see /projects")
+                return
+            pid, name = p["id"], html.escape(p["name"])
+            if sub in ("rm", "delete"):
+                msg = f"🗑 {name} deleted" if projects.delete(conn, pid, actor="telegram") else "Already deleted."
+            else:
+                st = {"done": "done", "archive": "archived", "on": "active", "reopen": "active"}[sub]
+                ok = projects.set_status(conn, pid, st, actor="telegram")
+                msg = (f"✅ {name} is {st}" if ok else f"{name} is {html.escape(projects.status_text(p))}.")
+        self.api.send(chat_id, msg)
+
+    def project_intent(self, link: dict, intent: dict, question: str = "") -> None:
+        if intent["op"] == "list":
+            return self.send_projects(link)
+        if intent["op"] == "add":
+            return self.create_project(link, intent["text"])
+        return self.project_status(link, intent["ref"], question)
+
+    def _project_callback(self, q: dict, link: dict, op: str, pid: int) -> None:
+        from . import projects
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if op == "y":
+                res = projects.confirm(conn, pid, actor="telegram")
+                ok, label = res["active"], f"✅ Project #{pid} saved and on"
+            else:
+                ok, label = projects.delete(conn, pid, actor="telegram"), f"✖ Project #{pid} cancelled"
+        if not ok:
+            self.api.call("answerCallbackQuery", callback_query_id=q["id"], text="Not found (or already done)")
+            return
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label[:190])
+        self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                      reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
+
+    def _project_suggestion_callback(self, q: dict, link: dict, op: str, sid: int) -> None:
+        from . import projects
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if op == "y":
+                res = projects.accept_suggestion(conn, sid, actor="telegram")
+                ok = not res.get("error")
+                label = f"✅ Created #{res['project']['id']}" if ok else res["error"]
+            else:
+                ok = projects.dismiss_suggestion(conn, sid, actor="telegram")
+                label = "✖ Won't suggest that again" if ok else "Not found (or already done)"
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label[:190])
+        if ok:
+            self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                          reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
+
     def rule_intent(self, link: dict, intent: dict) -> None:
         """Free text recognised by rules.parse_intent ("turn off the rugby rule until February")."""
         if intent.get("error"):
@@ -715,8 +1101,11 @@ class Bot:
         elif cmd == "/needs":
             with db.user_session(link["ctx"]) as conn:
                 ny = brief_mod.needs_you(conn, days=3)
-            lines = [f"🔔 {html.escape(r['sender'])} — {html.escape(r['subject'] or '')}" for r in ny["alerts"]]
-            lines += [f"↩️ {html.escape(r['sender'])} — {html.escape(r['subject'] or '')}" for r in ny["awaiting_reply"]]
+            def _line(icon: str, r: dict) -> str:
+                summ = (r.get("summary") or "").strip()
+                more = f"\n    {html.escape(summ[:220])}" if summ and summ != r.get("subject") else ""
+                return f"{icon} <b>{html.escape(r['subject'] or '(no subject)')}</b> — {html.escape(r['sender'])}{more}"
+            lines = [_line("🔔", r) for r in ny["alerts"]] + [_line("↩️", r) for r in ny["awaiting_reply"]]
             self.api.send(chat_id, ("<b>Needs attention</b>\n" + "\n".join(lines) + "\n\n/seen to clear")
                           if lines else "Nothing needs you. 👌")
         elif cmd == "/seen":
@@ -733,6 +1122,16 @@ class Bot:
             self.send_rules(link)
         elif cmd in ("/suggestrules", "/rulesuggestions"):
             self.send_rule_suggestions(link)
+        elif cmd == "/track":
+            self.create_tracker(link, arg)
+        elif cmd == "/tracker":
+            self.tracker_command(link, arg)
+        elif cmd == "/trackers":
+            self.send_trackers(link)
+        elif cmd == "/project":
+            self.project_command(link, arg)
+        elif cmd == "/projects":
+            self.send_projects(link)
         elif cmd == "/unlink":
             with db.user_session(link["ctx"]) as conn:
                 unlink(conn)
@@ -740,12 +1139,18 @@ class Bot:
         elif cmd.startswith("/"):
             self.api.send(chat_id, HELP)
         else:
-            from . import rules
+            from . import rules, trackers
+            t_intent = trackers.parse_intent(text)
+            if t_intent:
+                return self.tracker_intent(link, t_intent, text)
             intent = rules.parse_intent(text, datetime.now(self.tz).date())
             if intent:
-                self.rule_intent(link, intent)
-            else:
-                self.answer_question(link, text)
+                return self.rule_intent(link, intent)
+            from . import projects
+            p_intent = projects.parse_intent(text)
+            if p_intent:
+                return self.project_intent(link, p_intent, text)
+            self.answer_question(link, text)
 
     def handle_callback(self, q: dict) -> None:
         chat_id = q["message"]["chat"]["id"]
@@ -765,6 +1170,18 @@ class Bot:
         sugg = re.fullmatch(r"rs:([yn]):(\d+)", q.get("data") or "")
         if sugg and link is not None:
             return self._suggestion_callback(q, link, sugg.group(1), int(sugg.group(2)))
+        trk = re.fullmatch(r"t:([ynpod]):(\d+)", q.get("data") or "")
+        if trk and link is not None:
+            return self._tracker_callback(q, link, trk.group(1), int(trk.group(2)))
+        tsg = re.fullmatch(r"ts:([yn]):(\d+)", q.get("data") or "")
+        if tsg and link is not None:
+            return self._tracker_suggestion_callback(q, link, tsg.group(1), int(tsg.group(2)))
+        prj = re.fullmatch(r"p:([yn]):(\d+)", q.get("data") or "")
+        if prj and link is not None:
+            return self._project_callback(q, link, prj.group(1), int(prj.group(2)))
+        psg = re.fullmatch(r"ps:([yn]):(\d+)", q.get("data") or "")
+        if psg and link is not None:
+            return self._project_suggestion_callback(q, link, psg.group(1), int(psg.group(2)))
         rule = re.fullmatch(r"r:([ynpod]):(\d+)", q.get("data") or "")
         if rule and link is not None:
             return self._rule_callback(q, link, rule.group(1), int(rule.group(2)))
@@ -800,10 +1217,35 @@ class Bot:
         for link in all_links():
             try:
                 self._maybe_brief(link, now_local)
+                self._tracker_checks(link, now_local)
                 if not link["muted"] and not in_quiet_hours(now_local, self.s.quiet_hours):
                     self._push_alerts(link)
+                    self._push_trackers(link)
             except Exception:
                 log.exception("scheduled work failed for user %s", link["ctx"].user_id)
+
+    def _tracker_checks(self, link: dict, now_local: datetime) -> None:
+        """On-sale morning reminders and service silence (throttled inside; no-op before migration 014). The
+        events they create are pushed by _push_trackers, so quiet hours and /mute apply."""
+        from . import trackers
+        if not trackers.checks_due(link["ctx"].user_id):
+            return
+        with db.user_session(link["ctx"]) as conn:
+            trackers.scheduled_checks(conn, now_local, key=link["ctx"].user_id)
+
+    def _push_trackers(self, link: dict) -> None:
+        """Tracker changes whose notify policy says so (callback-free messages), each marked as sent."""
+        from . import trackers
+        try:
+            with db.user_session(link["ctx"]) as conn:
+                evs = trackers.pending_notifications(conn, link.get("linked_at"))
+                texts = [trackers.render_event(ev, datetime.now(self.tz).date()) for ev in evs]
+                trackers.mark_notified(conn, [ev["id"] for ev in evs])
+        except oracledb.DatabaseError as e:
+            log.debug("tracker notifications unavailable: %s", e)
+            return
+        for t in texts:
+            self.api.send(link["chat_id"], t)
 
     def push_codes(self) -> None:
         """Sign-in codes/links: sent as soon as they arrive, regardless of quiet hours (you asked for them)."""
@@ -870,7 +1312,7 @@ class Bot:
                 cards.append({**d, "group_size": 1, "past_verdicts": {}, "conflict": False, "first_contact": first})
                 cur.execute("UPDATE decisions SET notified_at = SYSTIMESTAMP WHERE id = :1", [did])
         for d in cards:
-            self.api.send(link["chat_id"], "🔔 <b>New</b>\n" + render_card(d, link["detail"]),
+            self.api.send(link["chat_id"], render_alert(d, link["detail"]),
                           card_buttons(d["decision_id"], False, self._item_url(d["item_id"]), seen=True))
 
 

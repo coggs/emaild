@@ -53,6 +53,34 @@ Rules are written in plain words. Each one is read back to you with a preview of
 
 Plain words work too: "show my rules", "turn off the acme rule until February", "delete the streaming rule".
 
+## Trackers
+
+Boards for orders, service status and ticket sales, set up in plain words. Each tracker is read back to you with what it would have found in the last 90 days, and only starts when you tap **✅ Save**. Refer to a tracker by its number or a word from its name.
+
+| Command | What it does |
+|---|---|
+| `/track <what to track>` | Create a tracker (**✅ Save / ✖ Cancel**). e.g. `/track Track my Acme Shop orders`, `/track Track Example VPN and Example CDN status`, `/track From NSFC, tell me when tickets or a ballot go on sale` |
+| `/trackers` | Your boards: each item's state (🟢 🟠 🔴), the date that matters (expected delivery, next sale) and ⚠ stalled orders, with **Pause / Resume / Delete** buttons. Suggested trackers follow (**✅ Track / ✖ Never**). |
+| `/tracker show 2` | One board in full, with its read-back and your words. |
+| `/tracker off 2` · `/tracker on 2` · `/tracker rm 2` | Pause, resume or delete a tracker (`pause`, `resume`, `delete` also work). |
+| `/tracker test 2` | What tracker 2 finds in the last 90 days, changing nothing. `/tracker test <tracker in words>` tests one you haven't saved. |
+| *(automatic)* | Changes that matter arrive on their own, e.g. "📦 Acme Shop order 123-456: **shipped** (expected Fri)", "🟢 Example VPN: **recovered** (was down)", a reminder on the morning a sale opens. Quiet hours and `/mute` apply. |
+
+Plain words work too: "track my Acme Shop orders", "what's still in transit?", "is everything up?", "any tickets going on sale soon?", "show my trackers". If you're not tracking that kind of thing, the question goes to your email as usual.
+
+## Projects
+
+Projects group the mail of something you're involved in. An *umbrella* is ongoing (a club committee, the household); its *sub-projects* are goals with an end (a presentation night, a uniform order). emAIl files matching emails, notes decisions, asks of you, commitments, deadlines and open questions (each citing its email), and tells you where things stand. Each project is read back to you with what it would have filed in the last 90 days and only starts when you tap **✅ Save**.
+
+| Command | What it does |
+|---|---|
+| `/project add <what>` | Create a project (**✅ Save / ✖ Cancel**). e.g. `/project add Create a project for the NSFC committee, everything from nsfc.example.org`, `/project add Add a sub-project under NSFC: presentation night`, `/project add Track my kitchen renovation with the builder at builder.example.com` |
+| `/projects` | Your umbrellas and sub-projects: open asks, the next date, last activity. Suggested sub-projects follow (**✅ Create / ✖ Never**). |
+| `/project NSFC` | Where a project stands: sub-project one-liners and general business (umbrella) or asks / deadlines / commitments / decisions / open questions (sub-project), upcoming dates, who's waiting on whom, and a short overview written from the facts. `[email 123]` cites the email; open it on the dashboard. |
+| `/project done NSFC` · `/project archive NSFC` · `/project rm NSFC` · `/project on NSFC` | Mark done, archive (filing stops, history stays), delete (sub-projects move up a level), or reopen. |
+
+Plain words work too: "status of presentation night", "where are we with the kitchen renovation?", "what's happening with NSFC?", "show my projects", "add a sub-project under NSFC: uniform order". If no project has that name, emAIl finds the best-matching email thread and tells you where *it* stands instead. Only facts and summaries are sent here, never the emails themselves.
+
 ## Impersonation protection
 
 | Command | What it does |

@@ -366,11 +366,33 @@ def run_once(triage_enabled: bool = True) -> None:
             counts = triage.triage_user(ctx)
             if any(counts.values()):
                 log.info("user %s: triage %s", ctx.user_id, counts)
+            try:
+                better = triage.improve_summaries(ctx)
+                if better:
+                    log.info("user %s: %s alert summaries written", ctx.user_id, better)
+            except Exception as e:
+                log.warning("summaries skipped for user %s: %s", ctx.user_id, str(e)[:200])
             scrubbed = triage.scrub_expired(ctx)
             if scrubbed:
                 log.info("user %s: scrubbed %s expired codes/links", ctx.user_id, scrubbed)
         except Exception:
             log.exception("user %s: triage step failed", ctx.user_id)
+        try:  # trackers (F5): after triage, so security / one-time verdicts exist and win; bounded model calls
+            from . import trackers, triage
+            res = trackers.run_user(ctx, triage.triage_router())
+            if any(v for k, v in res.items() if k != "deferred"):
+                log.info("user %s: trackers %s", ctx.user_id, res)
+            with db.user_session(ctx) as conn:
+                trackers.refresh_suggestions(conn, key=ctx.user_id)      # at most daily, no model calls
+        except Exception as e:
+            log.warning("user %s: tracker step skipped: %s", ctx.user_id, str(e)[:200])
+        try:  # projects (Phase 3): after triage and trackers; deterministic filing, <= CYCLE_CAP model calls
+            from . import projects, triage
+            res = projects.run_user(ctx, triage.triage_router())
+            if any(v for k, v in res.items() if k not in ("deferred", "considered")):
+                log.info("user %s: projects %s", ctx.user_id, res)
+        except Exception as e:
+            log.warning("user %s: project step skipped: %s", ctx.user_id, str(e)[:200])
         try:  # rule suggestions from reviewed decisions: at most once a day (no model calls)
             from . import rules
             with db.user_session(ctx) as conn:
