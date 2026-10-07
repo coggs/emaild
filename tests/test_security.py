@@ -6,8 +6,8 @@ from emaild.search import Filters
 
 
 def _item(**kw):
-    base = dict(id=1, account_id=1, account="stu@example.com", sender_addr="andrew.m.photos@freemail.example",
-                sender_name="Chris Morgan", recipients={"to": [{"addr": "stu@example.com"}], "cc": []},
+    base = dict(id=1, account_id=1, account="me@example.com", sender_addr="andrew.m.photos@freemail.example",
+                sender_name="Chris Morgan", recipients={"to": [{"addr": "me@example.com"}], "cc": []},
                 subject="Photos from the weekend", received_at="2026-10-06", body="Click here to view the photos",
                 labels=["INBOX"], meta={}, attachments=[], is_from_me=False, rfc_message_id="<x@y>")
     base.update(kw)

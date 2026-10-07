@@ -32,8 +32,8 @@ def llm(**kw):
     return json.dumps(base)
 
 
-KNOWN = {"rugby australia": ["news@rugby.com.au"],
-         "australian grand prix": ["info@grandprix.com.au", "tickets@grandprix.com.au"],
+KNOWN = {"rugby australia": ["news@rugby.example.org"],
+         "australian grand prix": ["info@grandprix.example.org", "tickets@grandprix.example.org"],
          "riverside rovers": ["secretary@riversiderovers.example.org"],
          "strava": ["no-reply@strava.com"]}
 
@@ -56,11 +56,11 @@ def test_compile_tickets_rule(resolver):
     comp = c["compiled"]
     assert c["kind"] == "rule" and c["source"] == "llm" and c["name"] == "Ticket sales"
     assert comp["match"]["senders"] == ["Rugby Australia", "Australian Grand Prix"]
-    assert comp["match"]["sender_addrs"] == ["news@rugby.com.au", "info@grandprix.com.au", "tickets@grandprix.com.au"]
+    assert comp["match"]["sender_addrs"] == ["news@rugby.example.org", "info@grandprix.example.org", "tickets@grandprix.example.org"]
     assert comp["condition"]["topic"] == "tickets or a ballot going on sale" and comp["read_with_model"] is True
     assert comp["then"]["action"] == "alert" and comp["else"]["action"] == "archive"
     rb = c["readback"]
-    assert rb.startswith("From Rugby Australia (news@rugby.com.au) or Australian Grand Prix (info@grandprix.com.au "
+    assert rb.startswith("From Rugby Australia (news@rugby.example.org) or Australian Grand Prix (info@grandprix.example.org "
                          "+1 more): if it's about tickets or a ballot going on sale → alert (Needs attention); "
                          "otherwise → archive.")
     assert rb.endswith("Gemma will read every email from these senders.")
@@ -182,7 +182,7 @@ def _rule(id, compiled, name=None, priority=100, kind="rule", text=""):
 
 
 STRAVA = {"match": {"senders": ["Strava"]}, "then": {"action": "archive"}}
-TICKETS = {"match": {"senders": ["Rugby Australia"], "sender_addrs": ["news@rugby.com.au"]},
+TICKETS = {"match": {"senders": ["Rugby Australia"], "sender_addrs": ["news@rugby.example.org"]},
            "condition": {"topic": "tickets or a ballot going on sale"},
            "then": {"action": "alert"}, "else": {"action": "archive"}}
 ACCOUNTANT = {"match": {"senders": ["Smith Accounting"]}, "floor": "keep"}
@@ -234,7 +234,7 @@ def test_parse_until_and_intents():
 # ---------- triage integration ----------
 
 def _item(**kw):
-    base = dict(id=1, account_id=1, account="stu@example.com", sender_addr="news@rugby.com.au",
+    base = dict(id=1, account_id=1, account="me@example.com", sender_addr="news@rugby.example.org",
                 sender_name="Rugby Australia", recipients={"to": [], "cc": []}, subject="Wallabies v All Blacks",
                 received_at="2026-10-06 09:00:00", body="Big match news.", labels=["INBOX", "CATEGORY_PROMOTIONS"],
                 meta={"list_unsubscribe": "<https://x>"}, attachments=[], is_from_me=False, rfc_message_id="")
@@ -302,7 +302,7 @@ def test_deterministic_rule_skips_model_and_heuristic(offline):
 
 def test_rule_never_archives_personal_mail_matched_by_name(offline):
     friend = _item(sender_addr="jo@gmail.com", sender_name="Jo Strava", meta={}, labels=["INBOX"],
-                   recipients={"to": [{"addr": "stu@example.com"}], "cc": []})
+                   recipients={"to": [{"addr": "me@example.com"}], "cc": []})
     p = triage.decide(None, FakeRouter(), friend, "Stu", [_rule(7, STRAVA)])
     assert p.action == "keep" and p.guard == "personal" and triage.needs_review(p, 0.75)
     by_addr = {"match": {"sender_addrs": ["jo@gmail.com"]}, "then": {"action": "archive"}}
@@ -460,7 +460,7 @@ class FakeAPI:
 
 
 PENDING = {"id": 31, "name": "Ticket <sales>", "kind": "rule", "status": "pending", "version": 1,
-           "readback": "From Rugby Australia (news@rugby.com.au): if it's about tickets → alert", "warnings": [],
+           "readback": "From Rugby Australia (news@rugby.example.org): if it's about tickets → alert", "warnings": [],
            "fire_count": 0, "original_text": "x"}
 
 
@@ -487,7 +487,7 @@ def test_telegram_rule_save_flow(bot, monkeypatch):
                                                                                  "me when tickets go on sale"}})
     assert made == ["From Rugby Australia, alert me when tickets go on sale"]
     _, text, kb = bot.api.sent[-1]
-    assert "Ticket &lt;sales&gt;" in text and "news@rugby.com.au" in text and "Save it?" in text
+    assert "Ticket &lt;sales&gt;" in text and "news@rugby.example.org" in text and "Save it?" in text
     datas = [b["callback_data"] for b in kb["inline_keyboard"][0]]
     assert datas == ["r:y:31", "r:n:31"] and all(len(d.encode()) < 64 for d in datas)
     bot.handle_update({"update_id": 2, "callback_query": {"id": "q", "data": "r:y:31",
@@ -539,7 +539,7 @@ def test_cli_rule_add_yes(monkeypatch, capsys):
                         {"rule_id": rid, "active": True, "reapplied": {"checked": 9, "updated": 2, "retriage": 0}})
     cli.main(["rule", "add", "From Rugby Australia, alert me when tickets go on sale", "--yes"])
     out = capsys.readouterr().out
-    assert confirmed == [31] and "Ticket sales" in out and "news@rugby.com.au" in out and "rule 31 is on" in out
+    assert confirmed == [31] and "Ticket sales" in out and "news@rugby.example.org" in out and "rule 31 is on" in out
     assert "2 updated" in out
 
 

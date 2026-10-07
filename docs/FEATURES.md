@@ -9,6 +9,9 @@ This is the backlog of features beyond the phased roadmap in the design spec. Ea
 | F3 | Protected identities: web page + suggestions | Proposed (2026-10-07) | Phase 2 |
 | F4 | One command surface: CLI, MCP and Telegram parity | In progress (2026-10-07) | ongoing |
 | F5 | Trackers: status boards configured in plain language (orders, services, ticket releases…) | Proposed (2026-10-07); builds on rules (slice 1 done) | Phase 2 (rules) |
+| F6 | Generic IMAP connector (app passwords: iCloud, Fastmail, ISP mailboxes) | Possible later addition | after Phase 5 |
+
+**Phase 5, Outlook.com (2026-10-07): delivered** through Microsoft Graph (`src/emaild/channels/outlook.py`). Read-only `Mail.Read` over OAuth (auth code + PKCE, `consumers` authority). It uses per-folder delta sync for Inbox, Sent, Junk and Archive, and fetches raw MIME through the same parser as Gmail. Outlook state is mapped onto the Gmail label names, so triage, search and briefs work unchanged. Setup is in `docs/SETUP.md` (5b). A generic IMAP connector (F6) could later cover providers that still allow app passwords (iCloud, Fastmail, many ISPs). Outlook.com can't use it because Microsoft turned off basic auth there in September 2024.
 
 ---
 

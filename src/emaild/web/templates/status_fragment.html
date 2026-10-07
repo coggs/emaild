@@ -12,7 +12,7 @@
 {% if codes %}
 <h2>🔑 Active sign-in codes</h2>
 <div class="list">{% for c in codes %}<div class="li"><b>{{ c.sender }}</b> — {{ c.subject }}
-  <span class="s">· expires in {{ c.mins_left }} min — open Gmail to use it</span></div>{% endfor %}</div>
+  <span class="s">· expires in {{ c.mins_left }} min — open your mailbox to use it</span></div>{% endfor %}</div>
 {% endif %}
 {% if needs and (needs.alerts or needs.awaiting_reply) %}
 <h2>🔔 Needs attention <span class="muted">(last 3 days)</span>
@@ -25,11 +25,11 @@
 {% endif %}
 <h2>Accounts</h2>
 <table>
-  <tr><th>Account</th><th>Status</th><th>Phase</th><th>Messages</th><th>Last sync (UTC)</th></tr>
+  <tr><th>Account</th><th>Provider</th><th>Status</th><th>Phase</th><th>Messages</th><th>Last sync (UTC)</th></tr>
   {% for a in status.accounts %}
-  <tr><td>{{ a.address }}</td><td>{{ a.status }}{% if a.last_error %}<div class="err">{{ a.last_error[:160] }}</div>{% endif %}</td>
+  <tr><td>{{ a.address }}</td><td>{{ {"gmail": "Gmail", "outlook": "Outlook.com"}.get(a.provider, a.provider) }}</td><td>{{ a.status }}{% if a.last_error %}<div class="err">{{ a.last_error[:160] }}</div>{% endif %}</td>
       <td>{{ "incremental" if a.backfill_done else "backfilling" }}</td><td>{{ a['items'] }}</td><td>{{ a.last_sync_at or "—" }}</td></tr>
   {% else %}
-  <tr><td colspan="5" class="muted">No accounts linked yet.</td></tr>
+  <tr><td colspan="6" class="muted">No accounts linked yet.</td></tr>
   {% endfor %}
 </table>

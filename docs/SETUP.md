@@ -1,6 +1,6 @@
 # Phase 0 setup — Ubuntu 24.04 on WSL2 + rootless Podman
 
-Run everything from the Ubuntu shell in `/mnt/d/dev/emAIl`. You need Podman 4.9+, podman-compose, systemd enabled in WSL, and Ollama reachable at `localhost:11434` from WSL (check: `curl -s localhost:11434/api/tags`).
+Run everything from the Ubuntu shell in `/path/to/emAIl`. You need Podman 4.9+, podman-compose, systemd enabled in WSL, and Ollama reachable at `localhost:11434` from WSL (check: `curl -s localhost:11434/api/tags`).
 
 Expect about 30 minutes, most of it the database initialising on first start.
 
@@ -13,7 +13,7 @@ Expect about 30 minutes, most of it the database initialising on first start.
 ## 0. The `emaild` command (do this first)
 
 ```bash
-cd /mnt/d/dev/emAIl && bash scripts/install-cli.sh
+cd /path/to/emAIl && bash scripts/install-cli.sh
 ```
 From then on, every command in this guide is just `emaild <command>`. It runs inside the running api container, or in a one-off container if the stack is down. `emaild help` lists everything. Host helpers:
 - `emaild up` / `emaild down` / `emaild ps`
@@ -23,7 +23,7 @@ From then on, every command in this guide is just `emaild <command>`. It runs in
 ## 1. Configure
 
 ```bash
-cd /mnt/d/dev/emAIl
+cd /path/to/emAIl
 cp .env.example .env
 python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
 ```
@@ -91,6 +91,29 @@ emaild ask "last 5 emails from <USER NAME>"
 
 `ask` (and Telegram free text, the **Ask your email** box on the Status page, and the MCP `ask_natural` tool) first works out what you mean: who the mail is from, which dates, newest or most relevant, how many, and whether you want a **list** of emails or an **answer**. *"show me the last 5 emails from <user name>"* lists his five newest; *"what are the latest perks from JB Hi-Fi?"* answers from the newest JB Hi-Fi mail (the name matches `jbhifi` addresses too); *"anything from <organisation> this week"* and *"what did the accountant say about BAS in August"* work the same way. Dates such as "this week" or "in August" are days in `EMAILD_TZ`. Each reply ends with an *Interpreted as …* line so you can see how it was read; `emaild ask --raw "..."` skips this and searches on the whole sentence as before. Spam, suspicious mail and one-time codes are never included.
 
+## 5b. Linking an Outlook.com account
+
+Outlook.com, Hotmail and Live mailboxes (personal Microsoft accounts) are read through Microsoft Graph with OAuth. Microsoft turned off basic authentication and app passwords for Outlook.com in September 2024, so IMAP with a password is no longer an option; emAIl asks only for read-only access (`Mail.Read`).
+
+1. Sign in to https://portal.azure.com with any Microsoft account that has an Entra ID directory (a free Azure account creates one). This doesn't have to be the mailbox you'll link.
+2. **Microsoft Entra ID → App registrations → New registration**:
+   - Name: `emAIl`.
+   - Supported account types: **Personal Microsoft accounts only**. *Accounts in any organizational directory and personal Microsoft accounts* also works. emAIl signs in through the `consumers` authority (`EMAILD_MS_TENANT=consumers`), which accepts personal accounts under either option. Single-tenant ("this organizational directory only") does **not** work for Outlook.com.
+   - Redirect URI: platform **Web**, `http://localhost:8080/oauth/microsoft/callback`. Behind a reverse proxy, use `https://<YOUR_DOMAIN>/oauth/microsoft/callback` instead (or add both under **Authentication**). It must equal `${EMAILD_PUBLIC_URL}/oauth/microsoft/callback` exactly.
+3. **API permissions → Add a permission → Microsoft Graph → Delegated permissions**: `Mail.Read`, `User.Read`, `offline_access`. Don't add `Mail.ReadWrite` or `Mail.Send`. Personal accounts consent for themselves when linking, so no admin consent is needed.
+4. **Certificates & secrets → New client secret**. Copy the secret's **Value** (not its Secret ID) straight away, because it's shown only once. Secrets expire (6–24 months). Put the expiry date in your calendar and create a new one before then. When it expires, sync stops with a token-endpoint error until you update `.env`.
+5. In `.env`, set `EMAILD_MS_CLIENT_ID=<Application (client) ID>` from the app's Overview page. For the secret, either set `EMAILD_MS_CLIENT_SECRET=<secret value>` or save it as `secrets/ms_client_secret`. Leave `EMAILD_MS_TENANT=consumers`.
+6. Apply the migration and recreate the containers so they read the new settings:
+   ```bash
+   emaild migrate
+   podman compose up -d --force-recreate api worker
+   ```
+7. Open the Status page → **Link an Outlook account** → sign in with the Outlook.com mailbox and accept the read-only permissions. The Accounts table shows it with provider *Outlook.com*.
+
+What syncs: Inbox, Sent Items, Junk Email and Archive (if you have one), for the same `EMAILD_BACKFILL_DAYS` window as Gmail, and then changes every cycle. Outlook's state is mapped onto the labels emAIl already uses: Junk → spam, Deleted Items → trash, Sent → sent, flagged → starred, unread, high importance → important. Focused Inbox's *Other* becomes `CATEGORY_OTHER`, which is a hint only and isn't treated as promotions. Moving a message to Junk in Outlook reclassifies it as spam in emAIl, just like Gmail's Spam label.
+
+If Microsoft stops accepting the sign-in (password change, revoked consent, or 90 days without a sync), the account shows **reauth** with "Microsoft sign-in expired — relink the account". Click **Link an Outlook account** again. Sync picks up where it stopped.
+
 ## 6. Connect an MCP client
 
 **HTTP:** `http://localhost:8081/mcp`. If `EMAILD_MCP_TOKEN` is set, send `Authorization: Bearer <token>`.
@@ -118,6 +141,7 @@ emaild ask "last 5 emails from <USER NAME>"
 
    Then recreate the api and mcp containers.
 2. Google OAuth client: add `https://<YOUR_DOMAINNAME>/oauth/google/callback` as a redirect URI.
+   Microsoft app registration (if you link Outlook.com): add `https://<YOUR_DOMAINNAME>/oauth/microsoft/callback` as a Web redirect URI.
 3. In Windows (PowerShell as Administrator), forward the ports into WSL's NAT IP (`hostname -I`) and allow them through the firewall:
    ```powershell
    netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8088 connectaddress=<wsl-ip> connectport=8088
@@ -141,7 +165,7 @@ sudo loginctl enable-linger $USER
 
 Then, in Windows Task Scheduler, add a task that runs **At log on** with this action:
 ```
-powershell.exe -WindowStyle Hidden -Command "wsl.exe -d Ubuntu-24.04 --exec bash -lc 'cd /mnt/d/dev/emAIl && podman compose up -d && exec sleep infinity'"
+powershell.exe -WindowStyle Hidden -Command "wsl.exe -d Ubuntu-24.04 --exec bash -lc 'cd /path/to/emAIl && podman compose up -d && exec sleep infinity'"
 ```
 The `sleep infinity` keeps the WSL VM alive, so the worker keeps polling after you close your terminals.
 
@@ -224,7 +248,7 @@ Say how you want mail handled, in your own words. emAIl compiles it (one local G
 
 ```bash
 emaild rule add "From Rugby Australia or the Australian Grand Prix, alert me when tickets or a ballot go on sale; archive the rest"
-#  From Rugby Australia (news@rugby.com.au) or Australian Grand Prix (info@grandprix.com.au +1 more): if it's about
+#  From Rugby Australia (news@rugby.example.org) or Australian Grand Prix (info@grandprix.example.org +1 more): if it's about
 #  tickets or a ballot going on sale → alert (Needs attention); otherwise → archive. Gemma will read every email
 #  from these senders.
 #  Save this rule? [y/N]

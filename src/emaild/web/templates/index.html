@@ -14,5 +14,6 @@
 <div id="status" hx-get="/fragments/status" hx-trigger="every 30s" hx-swap="innerHTML">
 {% include "status_fragment.html" %}
 </div>
-<p style="margin-top:24px"><a class="btn" href="/oauth/google/start">Link a Gmail account</a></p>
+<p style="margin-top:24px"><a class="btn" href="/oauth/google/start">Link a Gmail account</a>
+  <a class="btn" href="/oauth/microsoft/start">Link an Outlook account</a></p>
 {% endblock %}

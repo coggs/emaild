@@ -5,7 +5,7 @@ on sale; archive the rest"). Gemma compiles it - ONE call, with only the user's 
 content never reaches rule compilation - into a small, strictly validated JSON form:
 
     {"match":     {"senders": ["Rugby Australia", "Australian Grand Prix"],   # phrases, as the user wrote them
-                   "sender_addrs": ["news@rugby.com.au", ...],                 # resolved once, at compile time
+                   "sender_addrs": ["news@rugby.example.org", ...],                 # resolved once, at compile time
                    "domains": [], "subject_any": [], "account": null},
      "condition": {"topic": "tickets or a ballot going on sale"},             # semantic: the model judges it
      "then":      {"action": "alert", "importance": null, "category": null},

@@ -12,6 +12,18 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _secret(name: str, file_default: str) -> str:
+    """A secret from the env var, else from the file named by <name>_FILE (mounted from secrets/)."""
+    v = _env(name)
+    if v:
+        return v
+    path = Path(_env(f"{name}_FILE", file_default))
+    try:
+        return path.read_text().strip() if path.is_file() else ""
+    except OSError:
+        return ""
+
+
 def _int(name: str, default: int) -> int:
     v = _env(name)
     return int(v) if v else default
@@ -50,6 +62,12 @@ class Settings:
     public_url: str = field(default_factory=lambda: _env("EMAILD_PUBLIC_URL", "http://localhost:8080").rstrip("/"))
     backfill_days: int = field(default_factory=lambda: _int("EMAILD_BACKFILL_DAYS", 180))
     poll_seconds: int = field(default_factory=lambda: _int("EMAILD_POLL_SECONDS", 90))
+
+    # outlook.com (Microsoft Graph); redirect URI is {public_url}/oauth/microsoft/callback
+    ms_client_id: str = field(default_factory=lambda: _env("EMAILD_MS_CLIENT_ID"))
+    ms_client_secret: str = field(default_factory=lambda: _secret("EMAILD_MS_CLIENT_SECRET", "/run/emaild/ms_client_secret"),
+                                  repr=False)
+    ms_tenant: str = field(default_factory=lambda: _env("EMAILD_MS_TENANT", "consumers"))
 
     # storage
     blob_dir: Path = field(default_factory=lambda: Path(_env("EMAILD_BLOB_DIR", "/data/blobs")))

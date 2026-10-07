@@ -6,7 +6,7 @@ from emaild.normalise import chunk_text, clean_body, html_to_text, parse_mime
 def _mime(**kw) -> bytes:
     m = EmailMessage()
     m["From"] = kw.get("frm", "Jane Accountant <jane@acct.example>")
-    m["To"] = "Jordan <stu@example.com>"
+    m["To"] = "Jordan <me@example.com>"
     m["Subject"] = kw.get("subject", "BAS lodgement")
     m["Date"] = "Tue, 06 Oct 2026 09:30:00 +1100"
     m["Message-ID"] = "<abc@acct.example>"

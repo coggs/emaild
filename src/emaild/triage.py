@@ -213,7 +213,7 @@ def security_check(conn: oracledb.Connection | None, item: dict, stats: dict) ->
     if "SPAM" in labels:
         return Proposal(summary=item["subject"][:200] or "(no subject)", category="spam", importance="low",
                         needs_reply=False, action="archive", confidence=0.99,
-                        reasons="Gmail marked this as spam.", source="security")
+                        reasons="Your mail provider marked this as spam.", source="security")
     warnings = []
     auth = (item["meta"] or {}).get("auth") or {}
     strong = False   # clear-cut evidence -> held back without asking; otherwise a judgement call for review
@@ -707,7 +707,7 @@ def build_messages(item: dict, stats: dict, examples: list[dict], user_name: str
         f"Addressed directly to {user_name}: {'yes' if _addressed_directly(item) else 'no (cc, list or bcc)'}",
         f"Date: {item['received_at']}",
         f"Subject: {item['subject']}",
-        f"Gmail labels: {', '.join(labels) or 'none'}",
+        f"Mailbox labels: {', '.join(labels) or 'none'}",
         f"Bulk/list mail: {'yes' if is_bulk(item) else 'no'}",
         f"Attachments: {', '.join(a.get('filename', '') for a in item['attachments'][:5]) or 'none'}",
         f"History with this sender: {stats.get('received', 0)} received, {user_name} replied {stats.get('replied', 0)} "

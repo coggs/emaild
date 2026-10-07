@@ -8,44 +8,58 @@ import time
 from datetime import datetime, timezone
 
 from . import crypto, db, store
-from .channels.base import CursorExpired
+from .channels.base import Budget, BudgetExhausted, Channel, CursorExpired, RateLimited, ReauthRequired
 from googleapiclient.errors import HttpError
 
 from .channels.gmail import GmailChannel
+from .channels.outlook import OutlookChannel
 from .config import settings
 from .db import UserCtx
 
 log = logging.getLogger(__name__)
 
-MAX_PER_RUN = 400  # messages fetched per account per cycle, keeps the loop responsive during backfill
+# Per account per cycle, keeps the loop responsive during backfill. Gmail counts message fetch attempts;
+# Outlook counts every HTTP attempt (list/delta pages, metadata, MIME, retries, token refreshes) via a Budget.
+MAX_PER_RUN = 400
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def open_channel(ctx: UserCtx, account: dict) -> GmailChannel:
-    if account["provider"] != "gmail":
-        raise NotImplementedError(account["provider"])
+def _encrypt_creds(ctx: UserCtx, creds: dict) -> bytes:
+    s = settings()
+    return crypto.encrypt(s.master_key, ctx.tenant_id, ctx.user_id, json.dumps(creds).encode())
+
+
+def open_channel(ctx: UserCtx, account: dict, conn=None, budget: Budget | None = None) -> Channel:
+    """The connector for this account. With `conn`, rotated Outlook refresh tokens are saved the moment they arrive."""
     s = settings()
     info = json.loads(crypto.decrypt(s.master_key, ctx.tenant_id, ctx.user_id, account["token_enc"]))
-    return GmailChannel(info)
+    if account["provider"] == "gmail":
+        return GmailChannel(info)
+    if account["provider"] == "outlook":
+        def save(creds: dict) -> None:
+            store.update_account(conn, account["id"], token_enc=_encrypt_creds(ctx, creds))
+            conn.commit()
+        return OutlookChannel(info, account.get("sync_state"), budget=budget,
+                              on_credentials=save if conn is not None else None)
+    raise NotImplementedError(account["provider"])
 
 
-def _persist_creds(conn, ctx: UserCtx, account_id: int, ch: GmailChannel) -> None:
+def _persist_creds(conn, ctx: UserCtx, account_id: int, ch: Channel) -> None:
     creds = ch.updated_credentials()
     if creds:
-        s = settings()
-        store.update_account(conn, account_id, token_enc=crypto.encrypt(
-            s.master_key, ctx.tenant_id, ctx.user_id, json.dumps(creds).encode()))
+        store.update_account(conn, account_id, token_enc=_encrypt_creds(ctx, creds))
 
 
-def _store_ids(conn, ctx: UserCtx, account: dict, ch: GmailChannel, ids: list[str], budget: int) -> tuple[int, int, int]:
+def _store_ids(conn, ctx: UserCtx, account: dict, ch: Channel, ids: list[str], budget: int) -> tuple[int, int, int]:
     """Fetch and store ids not already stored, up to `budget` fetch attempts.
 
     Returns (stored, attempted, left_unprocessed). Every attempt counts against the budget, successful or not,
     so failures can't turn one cycle into a burst through the whole mailbox (Gmail per-user quota).
     A message that fails is recorded in sync_failures and retried on later cycles (up to 3 attempts).
+    Outlook also charges each request to its Budget and stops the cycle with BudgetExhausted / RateLimited.
     """
     existing = store.existing_ids(conn, account["id"], ids)
     new = [i for i in ids if i not in existing]
@@ -55,6 +69,9 @@ def _store_ids(conn, ctx: UserCtx, account: dict, ch: GmailChannel, ids: list[st
         try:
             item = ch.fetch(pid)
             store.insert_item(conn, ctx, account["id"], account["address"], item)
+        except (BudgetExhausted, RateLimited, ReauthRequired):
+            conn.rollback()
+            raise  # not this message's fault: stop the cycle; it is fetched next cycle
         except HttpError as e:
             if e.resp.status in (403, 429) and "rate" in str(e).lower():
                 raise  # quota: stop this account's cycle; the page is retried next cycle
@@ -76,7 +93,7 @@ def _fail(conn, account: dict, pid: str, e: Exception) -> None:
     conn.commit()
 
 
-def _retry_failures(conn, ctx: UserCtx, account: dict, ch: GmailChannel) -> int:
+def _retry_failures(conn, ctx: UserCtx, account: dict, ch: Channel) -> int:
     ids = store.retryable_failures(conn, account["id"])
     if not ids:
         return 0
@@ -84,59 +101,135 @@ def _retry_failures(conn, ctx: UserCtx, account: dict, ch: GmailChannel) -> int:
     return n
 
 
+def _pull_gmail(conn, ctx: UserCtx, account: dict, ch: GmailChannel, stats: dict) -> None:
+    s = settings()
+    account_id = account["id"]
+    budget = MAX_PER_RUN
+    if not account["backfill_done"]:
+        stats["phase"] = "backfill"
+        if not account["sync_cursor"]:
+            # record the incremental starting point BEFORE backfilling so nothing slips between
+            _, cursor = ch.identity()
+            store.update_account(conn, account_id, sync_cursor=cursor)
+            conn.commit()  # keep the cursor even if a later message fails and rolls back
+        token = account["backfill_token"]
+        while budget > 0:
+            page = ch.list_page(s.backfill_days, token)
+            n, attempted, left = _store_ids(conn, ctx, account, ch, page.ids, budget)
+            stats["stored"] += n
+            budget -= attempted
+            if left:
+                break  # page not finished; resume this page next cycle
+            token = page.next_token
+            store.update_account(conn, account_id, backfill_token=token)
+            conn.commit()
+            if not token:
+                store.update_account(conn, account_id, backfill_done=True, backfill_token=None)
+                break
+    else:
+        stats["phase"] = "incremental"
+        cursor, page_token = account["sync_cursor"], None
+        new_cursor = cursor
+        while True:
+            ch_ = ch.changes(cursor, page_token)
+            n, _, _ = _store_ids(conn, ctx, account, ch, list(dict.fromkeys(ch_.added)), 10_000)
+            stats["stored"] += n
+            for pid, labels in ch_.labels.items():
+                store.update_labels(conn, account_id, pid, labels)
+                stats["labels"] += 1
+            for pid in ch_.deleted:
+                store.mark_deleted(conn, account_id, pid)
+                stats["deleted"] += 1
+            conn.commit()
+            new_cursor = ch_.cursor or new_cursor
+            page_token = ch_.next_token
+            if not page_token:
+                break
+        store.update_account(conn, account_id, sync_cursor=new_cursor)
+
+
+def _pull_outlook(conn, ctx: UserCtx, account: dict, ch: OutlookChannel, stats: dict) -> None:
+    """Per-folder Graph delta rounds (the first, window-filtered round is the backfill). See channels/outlook.py.
+
+    A folder's saved link advances only after its page is fully processed, so stopping anywhere (budget, throttling,
+    crash) resumes from the same page; already-stored messages are skipped by id.
+    """
+    s = settings()
+    account_id = account["id"]
+
+    def save_state() -> None:
+        store.update_account(conn, account_id, sync_state=ch.state)
+        conn.commit()
+
+    stats["phase"] = "incremental" if account["backfill_done"] else "backfill"
+    try:
+        folders = ch.folders()
+        for folder in folders:
+            resynced = False
+            while True:
+                try:
+                    page = ch.delta(folder, s.backfill_days)
+                except CursorExpired as e:
+                    if resynced:
+                        raise
+                    log.warning("account %s: Outlook delta for %s expired (%s); re-backfilling that folder",
+                                account_id, folder, e)
+                    ch.reset_folder(folder)
+                    save_state()
+                    resynced = True
+                    stats["resynced"] = stats.get("resynced", 0) + 1
+                    continue
+                ids = list(dict.fromkeys(page.added))
+                existing = store.existing_ids(conn, account_id, ids)
+                for pid in ids:  # changes to stored messages: flags, read state, moves (e.g. into Junk -> SPAM)
+                    if pid in existing and pid in page.labels:
+                        store.update_labels(conn, account_id, pid, page.labels[pid])
+                        stats["labels"] += 1
+                conn.commit()
+                n, _, _ = _store_ids(conn, ctx, account, ch, ids, len(ids))
+                stats["stored"] += n
+                for pid in dict.fromkeys(page.deleted):  # left this folder: deleted, or moved somewhere else
+                    if not store.item_exists(conn, account_id, pid):
+                        continue
+                    labels = ch.locate(pid)
+                    if labels is None:
+                        store.mark_deleted(conn, account_id, pid)
+                        stats["deleted"] += 1
+                    else:
+                        store.update_labels(conn, account_id, pid, labels)
+                        stats["labels"] += 1
+                    conn.commit()
+                ch.advance(folder, page)
+                save_state()
+                if not page.next_token:
+                    break  # reached this round's deltaLink
+        if ch.caught_up() and not account["backfill_done"]:
+            store.update_account(conn, account_id, backfill_done=True)
+            conn.commit()
+    except BudgetExhausted:
+        conn.rollback()
+        stats["budget_exhausted"] = True  # resumes from the saved links next cycle
+
+
 def sync_account(ctx: UserCtx, account_id: int) -> dict:
     """One sync cycle for one account. Returns counters."""
-    s = settings()
     stats = {"stored": 0, "labels": 0, "deleted": 0, "phase": ""}
     with db.user_session(ctx) as conn:
         account = store.get_account(conn, account_id)
         if account is None or account["status"] not in ("active", "error"):
             return stats
         try:
-            ch = open_channel(ctx, account)
-            budget = MAX_PER_RUN
-            if not account["backfill_done"]:
-                stats["phase"] = "backfill"
-                if not account["sync_cursor"]:
-                    # record the incremental starting point BEFORE backfilling so nothing slips between
-                    _, cursor = ch.identity()
-                    store.update_account(conn, account_id, sync_cursor=cursor)
-                    conn.commit()  # keep the cursor even if a later message fails and rolls back
-                token = account["backfill_token"]
-                while budget > 0:
-                    page = ch.list_page(s.backfill_days, token)
-                    n, attempted, left = _store_ids(conn, ctx, account, ch, page.ids, budget)
-                    stats["stored"] += n
-                    budget -= attempted
-                    if left:
-                        break  # page not finished; resume this page next cycle
-                    token = page.next_token
-                    store.update_account(conn, account_id, backfill_token=token)
-                    conn.commit()
-                    if not token:
-                        store.update_account(conn, account_id, backfill_done=True, backfill_token=None)
-                        break
+            if account["provider"] == "outlook":
+                ch = open_channel(ctx, account, conn, Budget(MAX_PER_RUN))
+                _pull_outlook(conn, ctx, account, ch, stats)
+                try:
+                    stats["retried"] = _retry_failures(conn, ctx, account, ch)
+                except BudgetExhausted:
+                    stats["retried"] = 0
             else:
-                stats["phase"] = "incremental"
-                cursor, page_token = account["sync_cursor"], None
-                new_cursor = cursor
-                while True:
-                    ch_ = ch.changes(cursor, page_token)
-                    n, _, _ = _store_ids(conn, ctx, account, ch, list(dict.fromkeys(ch_.added)), 10_000)
-                    stats["stored"] += n
-                    for pid, labels in ch_.labels.items():
-                        store.update_labels(conn, account_id, pid, labels)
-                        stats["labels"] += 1
-                    for pid in ch_.deleted:
-                        store.mark_deleted(conn, account_id, pid)
-                        stats["deleted"] += 1
-                    conn.commit()
-                    new_cursor = ch_.cursor or new_cursor
-                    page_token = ch_.next_token
-                    if not page_token:
-                        break
-                store.update_account(conn, account_id, sync_cursor=new_cursor)
-            stats["retried"] = _retry_failures(conn, ctx, account, ch)
+                ch = open_channel(ctx, account)
+                _pull_gmail(conn, ctx, account, ch, stats)
+                stats["retried"] = _retry_failures(conn, ctx, account, ch)
             _persist_creds(conn, ctx, account_id, ch)
             store.update_account(conn, account_id, last_sync_at=_now(), last_error=None, status="active")
         except HttpError as e:
@@ -147,6 +240,15 @@ def sync_account(ctx: UserCtx, account_id: int) -> dict:
             else:
                 log.exception("account %s sync failed", account_id)
                 store.update_account(conn, account_id, last_error=str(e)[:3900], status="error", last_sync_at=_now())
+        except RateLimited as e:
+            conn.rollback()
+            log.warning("account %s: %s; resuming next cycle", account_id, e)
+            store.update_account(conn, account_id, last_error="Microsoft Graph throttling; backing off",
+                                 last_sync_at=_now())
+        except ReauthRequired as e:
+            conn.rollback()
+            log.warning("account %s: %s", account_id, e)
+            store.update_account(conn, account_id, last_error=str(e), status="reauth", last_sync_at=_now())
         except CursorExpired:
             log.warning("account %s: history cursor expired, rescanning", account_id)
             store.update_account(conn, account_id, sync_cursor=None, backfill_done=False, backfill_token=None)
@@ -160,11 +262,11 @@ def sync_account(ctx: UserCtx, account_id: int) -> dict:
 
 
 def verify_account(ctx: UserCtx, account_id: int) -> dict:
-    """Compare what Gmail lists for the backfill window with what is stored (lists ids only; cheap)."""
+    """Compare what the provider lists for the backfill window with what is stored (lists ids only; cheap)."""
     s = settings()
     with db.user_session(ctx) as conn:
         account = store.get_account(conn, account_id)
-        ch = open_channel(ctx, account)
+        ch = open_channel(ctx, account, conn)
         listed, token = [], None
         while True:
             page = ch.list_page(s.backfill_days, token)
@@ -174,7 +276,7 @@ def verify_account(ctx: UserCtx, account_id: int) -> dict:
                 break
         stored = store.existing_ids(conn, account_id, listed)
         missing = [i for i in listed if i not in stored]
-        out = {"address": account["address"], "window_days": s.backfill_days, "in_gmail": len(listed),
+        out = {"address": account["address"], "window_days": s.backfill_days, f"in_{account['provider']}": len(listed),
                "stored": len(stored), "missing": len(missing), **store.failure_summary(conn, account_id)}
         _persist_creds(conn, ctx, account_id, ch)
         return out
@@ -185,7 +287,13 @@ def rescan_account(ctx: UserCtx, account_id: int) -> None:
     with db.user_session(ctx) as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM sync_failures WHERE account_id = :1", [account_id])
-        store.update_account(conn, account_id, backfill_done=False, backfill_token=None)
+        account = store.get_account(conn, account_id)
+        if account and account["provider"] == "outlook":
+            # restart each folder's window-filtered delta round (keeps resolved folder ids); stored mail is skipped
+            state = {k: v for k, v in (account["sync_state"] or {}).items() if k != "sync"}
+            store.update_account(conn, account_id, backfill_done=False, sync_state=state)
+        else:
+            store.update_account(conn, account_id, backfill_done=False, backfill_token=None)
 
 
 def embed_user(ctx: UserCtx, max_batches: int = 5) -> int:

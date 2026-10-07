@@ -1,4 +1,4 @@
-"""FastAPI app: health, status, Gmail account linking, and the (Phase 0) placeholder dashboard.
+"""FastAPI app: health, status, Gmail / Outlook.com account linking, and the (Phase 0) placeholder dashboard.
 
 Phase 0 has no sign-in: it binds to localhost and acts as EMAILD_DEFAULT_USER. OIDC sign-in arrives with multi-user.
 """
@@ -21,6 +21,7 @@ from google_auth_oauthlib.flow import Flow
 
 from .. import brief as brief_mod
 from .. import crypto, db, recommend, store, telegram, threads, triage, users
+from ..channels import outlook
 from ..channels.gmail import SCOPES, GmailChannel
 from ..config import settings
 
@@ -29,6 +30,14 @@ app = FastAPI(title="emAIl", version="0.0.1")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 _pending: dict[str, tuple[float, Flow, str]] = {}  # state -> (created, flow, user email)
+_ms_pending: dict[str, tuple[float, str, str]] = {}  # state -> (created, PKCE verifier, user email)
+PENDING_SECONDS = 900
+
+
+def _prune(pending: dict) -> None:
+    now = time.time()
+    for k in [k for k, v in pending.items() if now - v[0] > PENDING_SECONDS]:
+        pending.pop(k, None)
 
 _OPEN_PATHS = {"/healthz"}
 
@@ -406,4 +415,52 @@ def google_callback(request: Request, state: str, code: str | None = None, error
         account_id = store.upsert_account(conn, "gmail", address, token_enc)
         store.audit(conn, "user", "account_linked", str(account_id), {"provider": "gmail", "address": address})
     log.info("linked gmail %s for %s", address, email)
+    return RedirectResponse("/?linked=" + address, status_code=303)
+
+
+# ---------- Outlook.com (Microsoft Graph) ----------
+
+def _ms_redirect() -> str:
+    return f"{settings().public_url}/oauth/microsoft/callback"
+
+
+@app.get("/oauth/microsoft/start")
+def microsoft_start(user: str | None = None):
+    """Authorisation code + PKCE; `state` is single-use and expires like the Google flow's."""
+    ctx = users.resolve(user)
+    ms = outlook.MsApp.from_settings()
+    if not ms.client_id:
+        raise HTTPException(500, "EMAILD_MS_CLIENT_ID is not set. See docs/SETUP.md (Linking an Outlook.com account)")
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = outlook.pkce_pair()
+    _prune(_ms_pending)
+    _ms_pending[state] = (time.time(), verifier, ctx.email)
+    return RedirectResponse(outlook.authorize_url(ms, _ms_redirect(), state, challenge))
+
+
+@app.get("/oauth/microsoft/callback")
+def microsoft_callback(state: str, code: str | None = None, error: str | None = None):
+    entry = _ms_pending.pop(state, None)  # consume the state even on error, so it can't be replayed
+    if error:
+        raise HTTPException(400, f"Microsoft returned an error: {error}")
+    if entry is None or time.time() - entry[0] > PENDING_SECONDS:
+        raise HTTPException(400, "unknown or expired sign-in attempt; start again")
+    if not code:
+        raise HTTPException(400, "Microsoft did not return an authorisation code; start again")
+    _, verifier, email = entry
+    ms = outlook.MsApp.from_settings()
+    try:
+        creds = outlook.exchange_code(ms, code, verifier, _ms_redirect())
+    except (outlook.ReauthRequired, outlook.TokenError) as e:
+        raise HTTPException(400, f"Microsoft sign-in failed: {e}") from e
+    address, _ = outlook.OutlookChannel(creds, app=ms).identity()
+    if not address:
+        raise HTTPException(400, "Microsoft did not return a mailbox address for this account")
+    ctx = users.resolve(email)
+    s = settings()
+    token_enc = crypto.encrypt(s.master_key, ctx.tenant_id, ctx.user_id, json.dumps(creds).encode())
+    with db.user_session(ctx) as conn:
+        account_id = store.upsert_account(conn, "outlook", address, token_enc)
+        store.audit(conn, "user", "account_linked", str(account_id), {"provider": "outlook", "address": address})
+    log.info("linked outlook %s for %s", address, email)
     return RedirectResponse("/?linked=" + address, status_code=303)

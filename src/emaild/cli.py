@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("question")
     ap.add_argument("--raw", action="store_true", help="skip query understanding (search on the whole sentence)")
     sub.add_parser("status")
-    sub.add_parser("verify", help="compare Gmail's message list for the backfill window with what is stored")
+    sub.add_parser("verify", help="compare the provider's message list for the backfill window with what is stored")
     sub.add_parser("rescan", help="re-run the backfill for all accounts (fetches only missing messages)")
     sub.add_parser("check-llm", help="verify the LLM endpoint and model are reachable")
     br = sub.add_parser("brief", help="generate a brief now and print it")

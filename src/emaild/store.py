@@ -42,18 +42,21 @@ def upsert_account(conn: oracledb.Connection, provider: str, address: str, token
 
 def get_account(conn: oracledb.Connection, account_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("""SELECT id, provider, address, status, token_enc, sync_cursor, backfill_token, backfill_done
+    cur.execute("""SELECT id, provider, address, status, token_enc, sync_cursor, backfill_token, backfill_done,
+                          sync_state
                      FROM accounts WHERE id = :1""", [account_id])
     r = cur.fetchone()
     if not r:
         return None
     token = r[4].read() if hasattr(r[4], "read") else r[4]
+    state = r[8] if isinstance(r[8], dict) or r[8] is None else json.loads(r[8])
     return dict(id=r[0], provider=r[1], address=r[2], status=r[3], token_enc=token,
-                sync_cursor=r[5], backfill_token=r[6], backfill_done=bool(r[7]))
+                sync_cursor=r[5], backfill_token=r[6], backfill_done=bool(r[7]), sync_state=state)
 
 
 def update_account(conn: oracledb.Connection, account_id: int, **fields) -> None:
-    allowed = {"token_enc", "sync_cursor", "backfill_token", "backfill_done", "last_sync_at", "last_error", "status"}
+    allowed = {"token_enc", "sync_cursor", "backfill_token", "backfill_done", "last_sync_at", "last_error", "status",
+               "sync_state"}
     sets, binds = [], {}
     for k, v in fields.items():
         if k not in allowed:
@@ -63,7 +66,10 @@ def update_account(conn: oracledb.Connection, account_id: int, **fields) -> None
     if not sets:
         return
     binds["id"] = account_id
-    conn.cursor().execute(f"UPDATE accounts SET {', '.join(sets)} WHERE id = :id", binds)
+    cur = conn.cursor()
+    if "sync_state" in binds:  # bound as native JSON: delta links can push it past a VARCHAR2 bind's 4000 bytes
+        cur.setinputsizes(sync_state=oracledb.DB_TYPE_JSON)
+    cur.execute(f"UPDATE accounts SET {', '.join(sets)} WHERE id = :id", binds)
 
 
 # ---------- items ----------
@@ -144,9 +150,9 @@ def update_labels(conn: oracledb.Connection, account_id: int, provider_id: str, 
     cur = conn.cursor()
     cur.execute("UPDATE items SET labels = :1 WHERE account_id = :2 AND provider_id = :3",
                 [json.dumps(labels), account_id, provider_id])
-    if "SPAM" in labels:  # marked as spam in Gmail (by Gmail or by the user): reclassify any open proposal
+    if "SPAM" in labels:  # marked as spam by the provider or the user (Gmail Spam / Outlook Junk): reclassify
         cur.execute("""UPDATE decisions SET category = 'spam', action = 'archive', importance = 'low',
-                              needs_review = FALSE, reasons = 'Gmail marked this as spam.'
+                              needs_review = FALSE, reasons = 'Your mail provider marked this as spam.'
                         WHERE status = 'proposed' AND item_id IN
                               (SELECT id FROM items WHERE account_id = :1 AND provider_id = :2)""",
                     [account_id, provider_id])

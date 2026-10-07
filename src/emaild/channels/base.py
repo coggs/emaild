@@ -40,3 +40,27 @@ class Channel(Protocol):
 
     def updated_credentials(self) -> dict | None:
         """Credentials to persist if they were refreshed during this session, else None."""
+
+
+class RateLimited(Exception):
+    """The provider is throttling us beyond what a short in-cycle wait can absorb; resume next cycle."""
+
+
+class ReauthRequired(Exception):
+    """The stored grant is no longer accepted (expired, revoked, password changed); the user must relink."""
+
+
+class BudgetExhausted(Exception):
+    """This account has used its request budget for the cycle; work resumes from saved progress next cycle."""
+
+
+@dataclass
+class Budget:
+    """Requests one account may make in one sync cycle. Every attempt counts - retries and failures too -
+    so a throttled or failing mailbox can't turn a cycle into a burst."""
+    left: int
+
+    def charge(self, n: int = 1) -> None:
+        if self.left < n:
+            raise BudgetExhausted()
+        self.left -= n
