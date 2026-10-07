@@ -134,6 +134,8 @@ def build(conn: oracledb.Connection, since: datetime, until: datetime | None = N
     from . import recommend  # late import: recommend uses this module's FINAL_ACTION
     waiting_on = recommend.followup_nudges(conn, limit=6)
     unsubs = len(recommend.unsubscribe_candidates(conn))
+    from . import rules  # late import: rules uses this module's FINAL_ACTION
+    rule_suggestions = rules.count_suggestions(conn)
     tz = ZoneInfo(settings().timezone)
     local = lambda d: d.astimezone(tz).strftime("%a %d %b %H:%M")  # noqa: E731
     return {
@@ -143,7 +145,7 @@ def build(conn: oracledb.Connection, since: datetime, until: datetime | None = N
         "alerts": ny["alerts"], "awaiting_reply": ny["awaiting_reply"], "important": important,
         "new_senders": new_senders, "waiting_review": stats["waiting_review"], "account_problems": problems,
         "held_back": held_back, "codes_expired": codes,
-        "waiting_on_others": waiting_on, "unsub_suggestions": unsubs,
+        "waiting_on_others": waiting_on, "unsub_suggestions": unsubs, "rule_suggestions": rule_suggestions,
         "overview": None,
     }
 
@@ -253,6 +255,9 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
         tail.append(f"🧐 {b['waiting_review']} waiting for your review — /review")
     if b.get("unsub_suggestions"):
         tail.append(f"🧹 {b['unsub_suggestions']} lists you could unsubscribe from — /unsubs")
+    if b.get("rule_suggestions"):
+        n = int(b["rule_suggestions"])
+        tail.append(f"💡 {n} rule suggestion{'s' if n != 1 else ''} — /suggestrules")
     for p in b.get("account_problems") or []:
         tail.append(f"⚠️ {html.escape(p['account'])}: {html.escape(p['status'])}")
     if tail:

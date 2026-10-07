@@ -313,6 +313,57 @@ def norm(s: str | None) -> str:
 _NORM_SQL = "REGEXP_REPLACE(LOWER({col}), '[^a-z0-9]', '')"
 
 
+# Words that mean "the whole organisation" rather than one mailbox: "the club committee", "the school office".
+GROUP_WORDS = frozenset("""committee committees team club board staff member members office admin administration
+    management everyone anyone all people group crew association council executive exec organisation organization
+    company folks""".split())
+
+
+def _org_tokens(sender: str) -> tuple[list[str], bool]:
+    """(core tokens, has a group word): "Northside FC committee" -> (["northside", "fc"], True)."""
+    words = [w for w in re.split(r"[\s,]+", sender.lower()) if w and w not in ("the", "a", "an", "my", "our", "from")]
+    group = any(w.strip(".'") in GROUP_WORDS for w in words)
+    core = [t for t in (norm(w) for w in words if w.strip(".'") not in GROUP_WORDS) if len(t) >= 2]
+    return list(dict.fromkeys(core)), group
+
+
+def org_domain_for(core: list[str], domain: str, exact: bool = False) -> str | None:
+    """The shortest parent of `domain` whose first label holds all the core words joined ("nsfc" ->
+    mail.nsfc.example.org -> nsfc.example.org). Never a free-mail domain."""
+    from .identities import FREEMAIL
+    joined = "".join(core)
+    labels = domain.lower().split(".")
+    for k in range(len(labels) - 1):
+        cand = ".".join(labels[k:])
+        hit = joined == norm(labels[k]) if exact else joined in norm(labels[k])
+        if joined and hit:
+            return None if cand in FREEMAIL or cand.count(".") < 1 else cand
+    return None
+
+
+def pick_org(sender: str, rows: list[tuple]) -> dict | None:
+    """Organisation scope from (name, addr, count) rows: everyone at the organisation's domain(s).
+    Pure function, so it can be tested without a DB."""
+    core, group = _org_tokens(sender)
+    if not core:
+        return None
+    exact = not group        # a bare name must BE the domain's label ("NSFC" = nsfc.example.org), not just appear in it
+    by_dom: dict[str, int] = {}
+    addrs: dict[str, int] = {}
+    for _name, addr, count in rows:
+        if not addr or "@" not in addr:
+            continue
+        d = org_domain_for(core, addr.rsplit("@", 1)[1], exact)
+        if d:
+            by_dom[d] = by_dom.get(d, 0) + int(count or 0)
+            addrs[addr.lower()] = addrs.get(addr.lower(), 0) + int(count or 0)
+    if not by_dom:
+        return None
+    domains = sorted(by_dom, key=lambda d: -by_dom[d])[:5]
+    top = sorted(addrs, key=lambda a: -addrs[a])[:20]
+    return {"phrase": sender, "label": sender.strip(), "addrs": top, "domains": domains}
+
+
 def resolve_sender(conn, sender: str | None) -> dict | None:
     """Match a sender phrase against senders the user has actually received mail from.
 
@@ -323,6 +374,23 @@ def resolve_sender(conn, sender: str | None) -> dict | None:
     """
     if not sender:
         return None
+    core, group = _org_tokens(sender)
+    if core and (group or len(core) == 1):
+        # "the X committee" means everyone at X's domain; a bare one-word name ("anything from NSFC") is tried
+        # as an organisation first too. Person names ("Sam Taylor") have two words and no group word, so skip this.
+        binds_o: dict = {}
+        conds_o = []
+        dom_sql = "REGEXP_REPLACE(LOWER(SUBSTR(i.sender_addr, INSTR(i.sender_addr, '@') + 1)), '[^a-z0-9]', '')"
+        binds_o["d0"] = f"%{''.join(core)}%"
+        conds_o.append(f"{dom_sql} LIKE :d0")
+        cur = conn.cursor()
+        cur.execute(f"""SELECT i.sender_name, LOWER(i.sender_addr), COUNT(*) FROM items i
+                        WHERE {' AND '.join(conds_o)} AND {EXCLUDE_UNSAFE}
+                        GROUP BY i.sender_name, LOWER(i.sender_addr)
+                        ORDER BY COUNT(*) DESC FETCH FIRST 200 ROWS ONLY""", binds_o)
+        org = pick_org(sender, cur.fetchall())
+        if org:
+            return org
     tokens = [t for t in (norm(w) for w in re.split(r"[\s,]+", sender)) if len(t) >= 2]
     tokens = list(dict.fromkeys(tokens))[:5]
     whole = norm(sender)
@@ -390,7 +458,9 @@ def _summaries(conn, item_ids: list[int]) -> dict[int, str]:
 def describe(q: Query, match: dict | None = None) -> str:
     """'list · from JB Hi-Fi (offers@email.jbhifi.com.au) · about perks · since 2026-10-05 · newest · 5'"""
     parts = [q.mode]
-    if match:
+    if match and match.get("domains"):
+        parts.append(f"from {match['label']} (anyone @{', @'.join(match['domains'])})")
+    elif match:
         addrs = match["addrs"]
         who = addrs[0] if len(addrs) == 1 else f"{len(addrs)} addresses"
         parts.append(f"from {match['label']} ({who})" if match["label"] != addrs[0] else f"from {who}")
@@ -425,7 +495,9 @@ def run(conn, question: str, router, today: date | None = None, tz: str | None =
             match = resolve_sender(conn, q.sender)
         except Exception:
             log.exception("sender resolution failed")
-        if match:
+        if match and match.get("domains"):
+            f.sender_domains = match["domains"]
+        elif match:
             f.sender_addrs = match["addrs"]
         elif q.mode == "list":
             f.sender = q.sender          # substring match on name/address; empty result is the honest answer

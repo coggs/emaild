@@ -225,7 +225,9 @@ def rules_page(request: Request):
     with db.user_session(ctx) as conn:
         rows = rules.list_rules(conn)
         waiting = triage.stats(conn)["waiting_review"]
-    return templates.TemplateResponse(request, "rules.html", {"rules": rows, "page": "rules", "waiting": waiting})
+        suggestions = rules.list_suggestions(conn, key=ctx.user_id)
+    return templates.TemplateResponse(request, "rules.html", {"rules": rows, "page": "rules", "waiting": waiting,
+                                                              "suggestions": suggestions})
 
 
 @app.post("/rules", response_class=HTMLResponse)
@@ -236,11 +238,46 @@ def rules_add(text: str = Form("")):
     text = text.strip()[:2000]
     if not text:
         return HTMLResponse("")
+    router = Router()
     with db.user_session(users.resolve()) as conn:
-        r = rules.create(conn, text, Router(), actor="web")
+        r = rules.create(conn, text, router, actor="web")
+        if not r.get("error"):
+            r["dry_run"] = rules.dry_run_safe(conn, r, router)
     if r.get("error"):
         return HTMLResponse(f'<div class="card err">{html.escape(r["error"])}</div>')
     return HTMLResponse(str(_rules_macro("proposal")(r)))
+
+
+@app.post("/rules/{rule_id}/test", response_class=HTMLResponse)
+def rules_test(rule_id: int, days: int = Form(30)):
+    """Dry run of an existing rule over recent mail (nothing changes)."""
+    from .. import rules
+    from ..llm.router import Router
+    with db.user_session(users.resolve()) as conn:
+        res = rules.dry_run_ref(conn, str(int(rule_id)), days=days, router=Router())
+    if res.get("error"):
+        return HTMLResponse(f'<div class="err" id="t{rule_id}">{html.escape(res["error"])}</div>')
+    return HTMLResponse(str(_rules_macro("dry_run")(res["dry_run"], f"t{rule_id}")))
+
+
+@app.post("/rules/suggestions/{sid}/accept", response_class=HTMLResponse)
+def rules_suggestion_accept(sid: int):
+    from .. import rules
+    with db.user_session(users.resolve()) as conn:
+        res = rules.accept_suggestion(conn, sid, actor="web")
+        if res.get("error"):
+            return HTMLResponse(f'<div class="li err" id="s{sid}">{html.escape(res["error"])}</div>')
+    r = res["rule"]
+    return HTMLResponse(f'<div class="done" id="s{sid}">✅ Saved as rule #{int(r["id"])} and turned on: '
+                        f'{html.escape(r.get("readback") or "")}</div>')
+
+
+@app.post("/rules/suggestions/{sid}/dismiss", response_class=HTMLResponse)
+def rules_suggestion_dismiss(sid: int):
+    from .. import rules
+    with db.user_session(users.resolve()) as conn:
+        rules.dismiss_suggestion(conn, sid, actor="web")
+    return HTMLResponse(f'<div class="done" id="s{sid}">✖ Won\'t suggest that again</div>')
 
 
 @app.post("/rules/{rule_id}/confirm", response_class=HTMLResponse)

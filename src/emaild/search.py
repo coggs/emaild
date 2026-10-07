@@ -58,6 +58,8 @@ class Filters:
     include_spam: bool = False
     # exact sender addresses (any of), e.g. from query.resolve_sender; combined with `sender` if both are set
     sender_addrs: list[str] | None = None
+    # whole organisations: anyone @domain or @any.subdomain (e.g. "the club committee" -> everyone at the club's domain)
+    sender_domains: list[str] | None = None
     # Date boundaries. None (the default, used by the MCP search/ask tools) keeps the original behaviour:
     # `after`/`before` mean UTC midnight. With an IANA zone (query.run passes EMAILD_TZ) they mean local midnight
     # in that zone, converted to a naive UTC datetime; the session TIME_ZONE is +00:00, so Oracle compares it
@@ -81,6 +83,13 @@ class Filters:
                 binds[f"f_sa{n}"] = a.lower()
                 names.append(f":f_sa{n}")
             parts.append(f"LOWER(i.sender_addr) IN ({', '.join(names)})")
+        if self.sender_domains:
+            ors = []
+            for n, d in enumerate(self.sender_domains[:10]):
+                binds[f"f_sd{n}"] = f"%@{d.lower()}"
+                binds[f"f_ss{n}"] = f"%.{d.lower()}"
+                ors += [f"LOWER(i.sender_addr) LIKE :f_sd{n}", f"LOWER(i.sender_addr) LIKE :f_ss{n}"]
+            parts.append("(" + " OR ".join(ors) + ")")
         if self.after:
             parts.append("i.received_at >= :f_after")
             binds["f_after"] = self.boundary(self.after)

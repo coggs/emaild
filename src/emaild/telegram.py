@@ -43,6 +43,8 @@ HELP = ("<b>emAIl</b> — your inbox, without the inbox.\n\n"
         "words (read back to you; ✅ Save turns it on)\n"
         "/rules — your rules · /rule off 3 [until February] · /rule on 3 · /rule rm 3 · /rule show 3\n"
         "/rule guidance: I care less about conference marketing unless I'm speaking — soft guidance for the model\n"
+        "/rule test 3 — what rule 3 would have done to the last 30 days (or /rule test &lt;new rule in words&gt;)\n"
+        "/suggestrules — rules emAIl suggests from your reviews (✅ Save / ✖ Never)\n"
         "Anything else you type is a question about your email, e.g. \"last 5 emails from Matt\" (a list) or "
         "\"what are the latest perks from JB Hi-Fi?\" (an answer).")
 
@@ -196,16 +198,39 @@ def render_unsub_result(res: dict) -> str:
 RULE_STATUS = {"pending": "⏳ waiting for you", "active": "✅ on", "paused": "⏸ off", "deleted": "🗑 deleted"}
 
 
-def render_rule_proposal(rule: dict) -> str:
-    """Read-back of a newly compiled rule (generated from the compiled JSON, not the model's prose)."""
+def render_dry_run(res: dict | None, examples: int = 3) -> str:
+    """A dry run's summary (+ a few examples), escaped. '' without one."""
+    from . import rules
+    if not res:
+        return ""
+    out = [f"🔍 <i>{html.escape(res['summary'])}</i>"]
+    out += [f"• {html.escape(line)}" for line in rules.example_lines(res, examples)]
+    return "\n".join(out)
+
+
+def render_rule_proposal(rule: dict, dry: dict | None = None) -> str:
+    """Read-back of a newly compiled rule (generated from the compiled JSON, not the model's prose), with its dry
+    run over the last 30 days when there is one."""
     kind = "Guidance" if rule.get("kind") == "guidance" else "Rule"
     v = f" (v{rule['version']})" if rule.get("version", 1) > 1 else ""
     out = [f"📏 <b>{kind} #{rule['id']}{v}: {html.escape(rule.get('name') or '')}</b>",
            html.escape(rule.get("readback") or "")]
     for w in rule.get("warnings") or []:
         out.append(f"⚠️ {html.escape(w)}")
+    if dry:
+        out.append(render_dry_run(dry))
     out.append("Save it?")
-    return "\n".join(out)
+    return "\n".join(out)[:3900]
+
+
+def render_rule_suggestion(sg: dict) -> str:
+    return (f"💡 <b>{html.escape(sg.get('label') or '')}</b>\n“{html.escape(sg['text'])}”\n"
+            f"{html.escape(sg.get('readback') or '')}\n<i>Why: {html.escape(sg.get('evidence') or '')}</i>")[:3900]
+
+
+def rule_suggestion_buttons(sid: int) -> dict:
+    return {"inline_keyboard": [[{"text": "✅ Save", "callback_data": f"rs:y:{sid}"},
+                                 {"text": "✖ Never", "callback_data": f"rs:n:{sid}"}]]}
 
 
 def rule_proposal_buttons(rule_id: int) -> dict:
@@ -413,18 +438,57 @@ class Bot:
             self.api.send(link["chat_id"], "Use: <code>/rule Always archive Strava emails</code>")
             return
         self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        router = Router()
         with db.user_session(link["ctx"]) as conn:
-            rule = rules.create(conn, text, Router(), actor="telegram")
+            rule = rules.create(conn, text, router, actor="telegram")
+            dry = None if rule.get("error") else rules.dry_run_safe(conn, rule, router)
         if rule.get("error"):
             self.api.send(link["chat_id"], html.escape(rule["error"]))
             return
-        self.api.send(link["chat_id"], render_rule_proposal(rule), rule_proposal_buttons(rule["id"]))
+        self.api.send(link["chat_id"], render_rule_proposal(rule, dry), rule_proposal_buttons(rule["id"]))
+
+    def send_rule_suggestions(self, link: dict) -> None:
+        from . import rules
+        with db.user_session(link["ctx"]) as conn:
+            rows = rules.list_suggestions(conn, key=link["ctx"].user_id)
+        if not rows:
+            self.api.send(link["chat_id"], "No rule suggestions right now. They come from emails you've reviewed "
+                                           "(/review) — when you keep correcting emAIl the same way for a sender.")
+            return
+        for sg in rows:
+            self.api.send(link["chat_id"], render_rule_suggestion(sg), rule_suggestion_buttons(sg["id"]))
+
+    def test_rule(self, link: dict, ref: str) -> None:
+        """/rule test <id|words|new rule text>: the dry run over the last 30 days (nothing is saved)."""
+        from . import rules
+        from .llm.router import Router
+        if not ref.strip():
+            self.api.send(link["chat_id"], "Use: <code>/rule test 3</code> or <code>/rule test Always archive "
+                                           "emails from Acme Streaming</code>")
+            return
+        self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        with db.user_session(link["ctx"]) as conn:
+            res = rules.dry_run_ref(conn, ref, days=30, router=Router())
+        if res.get("error"):
+            self.api.send(link["chat_id"], html.escape(res["error"]))
+            return
+        r = res["rule"]
+        head = (f"🧪 <b>#{r['id']} {html.escape(r.get('name') or '')}</b>" if r.get("id") else
+                f"🧪 <b>{html.escape(r.get('name') or '')}</b> (not saved)")
+        self.api.send(link["chat_id"], f"{head}\n{html.escape(r.get('readback') or '')}\n"
+                                       f"{render_dry_run(res['dry_run'], 5)}"[:3900])
 
     def send_rules(self, link: dict) -> None:
         from . import rules
         with db.user_session(link["ctx"]) as conn:
             rows = rules.list_rules(conn)
+            try:
+                n_sugg = rules.count_suggestions(conn)
+            except Exception:
+                n_sugg = 0
         text, kb = render_rules_list(rows)
+        if n_sugg:
+            text += f"\n\n💡 {n_sugg} rule suggestion{'s' if n_sugg != 1 else ''} — /suggestrules"
         self.api.send(link["chat_id"], text, kb)
 
     def rule_command(self, link: dict, arg: str) -> None:
@@ -433,6 +497,8 @@ class Bot:
         chat_id = link["chat_id"]
         sub, _, rest = arg.strip().partition(" ")
         sub = sub.lower()
+        if sub == "test":
+            return self.test_rule(link, rest)
         if sub not in ("off", "on", "rm", "delete", "show", "edit", "pause"):
             return self.create_rule(link, arg)
         rest = rest.strip()
@@ -480,11 +546,13 @@ class Bot:
                 if not text.strip():
                     self.api.send(chat_id, "Use: <code>/rule edit 3 the new wording</code>")
                     return
-                new = rules.edit(conn, rid, text, Router(), actor="telegram")
+                router = Router()
+                new = rules.edit(conn, rid, text, router, actor="telegram")
                 if new.get("error"):
                     self.api.send(chat_id, html.escape(new["error"]))
                     return
-                self.api.send(chat_id, render_rule_proposal(new), rule_proposal_buttons(rid))
+                self.api.send(chat_id, render_rule_proposal(new, rules.dry_run_safe(conn, new, router)),
+                              rule_proposal_buttons(rid))
                 return
         self.api.send(chat_id, msg)
 
@@ -535,6 +603,22 @@ class Bot:
                           reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
         else:
             self.api.send(chat_id, html.escape(label), reply_to=msg_id)
+
+    def _suggestion_callback(self, q: dict, link: dict, op: str, sid: int) -> None:
+        from . import rules
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if op == "y":
+                res = rules.accept_suggestion(conn, sid, actor="telegram")
+                ok = not res.get("error")
+                label = f"✅ Saved as rule #{res['rule']['id']}" if ok else res["error"]
+            else:
+                ok = rules.dismiss_suggestion(conn, sid, actor="telegram")
+                label = "✖ Won't suggest that again" if ok else "Not found (or already done)"
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label[:190])
+        if ok:
+            self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                          reply_markup={"inline_keyboard": [[{"text": label[:60], "callback_data": "noop"}]]})
 
     def _reco_callback(self, q: dict, link: dict, kind: str, ident: int) -> None:
         chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
@@ -647,6 +731,8 @@ class Bot:
             self.rule_command(link, arg)
         elif cmd == "/rules":
             self.send_rules(link)
+        elif cmd in ("/suggestrules", "/rulesuggestions"):
+            self.send_rule_suggestions(link)
         elif cmd == "/unlink":
             with db.user_session(link["ctx"]) as conn:
                 unlink(conn)
@@ -676,6 +762,9 @@ class Bot:
         reco = re.fullmatch(r"([ukf]):(\d+)", q.get("data") or "")
         if reco and link is not None:
             return self._reco_callback(q, link, reco.group(1), int(reco.group(2)))
+        sugg = re.fullmatch(r"rs:([yn]):(\d+)", q.get("data") or "")
+        if sugg and link is not None:
+            return self._suggestion_callback(q, link, sugg.group(1), int(sugg.group(2)))
         rule = re.fullmatch(r"r:([ynpod]):(\d+)", q.get("data") or "")
         if rule and link is not None:
             return self._rule_callback(q, link, rule.group(1), int(rule.group(2)))

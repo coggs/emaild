@@ -56,10 +56,20 @@ def _resolve_rule(conn, ref: str | None) -> dict | None:
     return r
 
 
-def _ask_confirm(conn, rule: dict, yes: bool, stdin) -> None:
-    """Read-back shown; turn it on (--yes or 'y'), discard it ('n'), or leave it pending (no terminal)."""
+def print_dry_run(res: dict | None, examples: int = 3) -> None:
+    from . import rules
+    if not res:
+        return
+    print(f"     {res['summary']}")
+    for line in rules.example_lines(res, examples):
+        print(f"       · {line}")
+
+
+def _ask_confirm(conn, rule: dict, yes: bool, stdin, dry: dict | None = None) -> None:
+    """Read-back (and dry run) shown; turn it on (--yes or 'y'), discard it ('n'), or leave it pending (no terminal)."""
     from . import rules
     print_rule(rule)
+    print_dry_run(dry)
     if yes:
         ok = True
     elif stdin.isatty():
@@ -99,14 +109,56 @@ def run_rule(a, stdin=None) -> None:
             if not text:
                 print('give the rule in plain words:  emaild rule add "Always archive Strava emails"')
                 return
-            rule = rules.create(conn, text, Router(), actor="cli")
+            router = Router()
+            rule = rules.create(conn, text, router, actor="cli")
             if rule.get("error"):
                 print(rule["error"])
                 return
-            _ask_confirm(conn, rule, a.yes, stdin)
+            _ask_confirm(conn, rule, a.yes, stdin, rules.dry_run_safe(conn, rule, router))
             return
         if a.op == "apply":
-            print(f"re-checked open decisions from the last {a.days} days: {rules.apply_now(conn, a.days)}")
+            days = a.days or 14
+            print(f"re-checked open decisions from the last {days} days: {rules.apply_now(conn, days)}")
+            return
+        if a.op == "test":
+            res = rules.dry_run_ref(conn, " ".join(args), days=a.days or 30, router=Router(),
+                                    sample=a.sample or rules.DRY_SAMPLE)
+            if res.get("error"):
+                print(res["error"])
+                return
+            r = res["rule"]
+            print(f"[{r['id']}] {r.get('name') or ''}" if r.get("id") else f"(new, not saved) {r.get('name') or ''}")
+            print(f"     {r.get('readback') or ''}")
+            print_dry_run(res["dry_run"], examples=8)
+            if res["dry_run"].get("truncated"):
+                print(f"     (only the newest {rules.DRY_ROW_CAP} candidate emails were checked)")
+            return
+        if a.op == "suggest":
+            if a.accept is not None:
+                res = rules.accept_suggestion(conn, a.accept, actor="cli")
+                if res.get("error"):
+                    print(res["error"])
+                    return
+                re_ = (res.get("confirm") or {}).get("reapplied") or {}
+                extra = ", ".join(f"{v} {k}" for k, v in re_.items() if k != "checked" and v)
+                print(f"saved as rule {res['rule']['id']} and turned on" + (f" (open decisions: {extra})"
+                                                                              if extra else ""))
+                print(f"     {res['rule'].get('readback') or ''}")
+                return
+            if a.dismiss is not None:
+                print("dismissed - it won't be suggested again" if rules.dismiss_suggestion(conn, a.dismiss,
+                                                                                             actor="cli")
+                      else f"no open suggestion {a.dismiss}")
+                return
+            rows = rules.list_suggestions(conn, key=ctx.user_id, refresh=True)
+            if not rows:
+                print("no rule suggestions right now (they come from emails you've reviewed)")
+            for sg in rows:
+                print(f"[{sg['id']}] {sg['label']}: “{sg['text']}”")
+                print(f"     {sg['readback']}")
+                print(f"     why: {sg['evidence']}")
+            if rows:
+                print("save one:  emaild rule suggest --accept N    never again:  emaild rule suggest --dismiss N")
             return
         r = _resolve_rule(conn, args[0] if args else None)
         if r is None:
@@ -128,11 +180,12 @@ def run_rule(a, stdin=None) -> None:
             if not text:
                 print('give the new wording:  emaild rule edit <id> "<text>"')
                 return
-            new = rules.edit(conn, rid, text, Router(), actor="cli")
+            router = Router()
+            new = rules.edit(conn, rid, text, router, actor="cli")
             if new.get("error"):
                 print(new["error"])
                 return
-            _ask_confirm(conn, new, a.yes, stdin)
+            _ask_confirm(conn, new, a.yes, stdin, rules.dry_run_safe(conn, new, router))
         elif a.op == "off":
             until = None
             if a.until:
@@ -219,12 +272,20 @@ def main(argv: list[str] | None = None) -> None:
     pr.add_argument("--remove", action="store_true")
     pr.add_argument("--suggest", action="store_true", help="show role-name senders and club domains found in your mail")
     ru = sub.add_parser("rule", help='rules in plain words: add "<text>" | edit <id> "<text>" | off <id> [--until DATE] '
-                                     '| on <id> | rm <id> | show <id> | confirm <id> | apply')
-    ru.add_argument("op", choices=["add", "edit", "off", "on", "rm", "show", "confirm", "apply", "list"])
+                                     '| on <id> | rm <id> | show <id> | confirm <id> | apply | test <id|words|"new '
+                                     'rule"> [--days N] | suggest [--accept N | --dismiss N]')
+    ru.add_argument("op", choices=["add", "edit", "off", "on", "rm", "show", "confirm", "apply", "list", "test",
+                                   "suggest"])
     ru.add_argument("args", nargs="*", help="rule text, or a rule id (or a few words from it) then text")
     ru.add_argument("--yes", action="store_true", help="save without asking")
     ru.add_argument("--until", help="with off: until this date, e.g. 2026-11-01 or February")
-    ru.add_argument("--days", type=int, default=14, help="with apply: re-check open decisions from this many days")
+    ru.add_argument("--days", type=int, default=None,
+                    help="with apply: re-check open decisions from this many days (default 14); with test: dry-run "
+                         "over this many days (default 30)")
+    ru.add_argument("--sample", type=int, default=None,
+                    help="with test: emails the model checks for a rule with a condition (default 8, max 20)")
+    ru.add_argument("--accept", type=int, help="with suggest: save suggestion N as a rule (and turn it on)")
+    ru.add_argument("--dismiss", type=int, help="with suggest: never suggest N again")
     rs = sub.add_parser("rules", help="list your rules")
     rs.add_argument("--all", action="store_true", help="include deleted rules")
     bm = sub.add_parser("benchmark", help="re-classify reviewed emails and score agreement with your verdicts")
@@ -351,7 +412,7 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "rule":
         run_rule(a)
     elif a.cmd == "rules":
-        a.op, a.args, a.yes = "list", [], False
+        a.op, a.args, a.yes, a.days = "list", [], False, None
         run_rule(a)
     elif a.cmd in ("needs", "seen"):
         from . import brief as brief_mod, db, users

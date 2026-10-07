@@ -20,8 +20,43 @@
     {% elif r.status == 'paused' %}
     <button class="btn" hx-post="/rules/{{ r.id }}/on" hx-target="#r{{ r.id }}" hx-swap="outerHTML">Turn on</button>
     {% endif %}
+    {% if r.kind == 'rule' %}
+    <button class="btn ghost" hx-post="/rules/{{ r.id }}/test" hx-target="#t{{ r.id }}" hx-swap="outerHTML"
+            title="What this rule would have done to the last 30 days of mail (nothing changes)">Test</button>
+    {% endif %}
     <button class="btn ghost" hx-post="/rules/{{ r.id }}/delete" hx-target="#r{{ r.id }}" hx-swap="outerHTML"
             hx-confirm="Delete rule #{{ r.id }}?">Delete</button>
+  </div>
+  <div id="t{{ r.id }}"></div>
+</div>
+{% endmacro %}
+
+{% macro dry_run(d, target_id='') %}
+<div class="dry s"{% if target_id %} id="{{ target_id }}"{% endif %} style="margin-top:6px">
+  <div>🔍 {{ d.summary }}</div>
+  {% set shown = namespace(n=0) %}
+  {% for bucket, rows in (d.examples or {}).items() if '→' in bucket or bucket in ('conflicts', 'protected') %}
+    {% for e in rows %}{% if shown.n < 6 %}{% set shown.n = shown.n + 1 %}
+    <div class="muted" style="font-size:13px">· {{ e.date[:10] }} {{ e.sender }} — {{ e.subject }}:
+      {% if bucket == 'protected' %}left alone{% else %}{{ e.current }} → {{ e.new }}{% endif %}</div>
+    {% endif %}{% endfor %}
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro suggestion(sg) %}
+<div class="li reco" id="s{{ sg.id }}">
+  <div class="who"><b>💡 {{ sg.label }}</b> <span class="chip">suggested</span>
+    <div>“{{ sg.text }}”</div>
+    {% if sg.readback %}<div class="s">{{ sg.readback }}</div>{% endif %}
+    <div class="s muted">Why: {{ sg.evidence }}</div>
+  </div>
+  <div class="row">
+    <button class="btn" hx-post="/rules/suggestions/{{ sg.id }}/accept" hx-target="#s{{ sg.id }}"
+            hx-swap="outerHTML">Save</button>
+    <button class="btn ghost" type="button" onclick="this.closest('.li').remove()">Not now</button>
+    <button class="btn ghost" hx-post="/rules/suggestions/{{ sg.id }}/dismiss" hx-target="#s{{ sg.id }}"
+            hx-swap="outerHTML">Never</button>
   </div>
 </div>
 {% endmacro %}
@@ -33,6 +68,7 @@
     <span class="chip">not saved yet</span></div>
   <p style="margin:8px 0">{{ r.readback }}</p>
   {% for w in r.warnings or [] %}<div class="err">⚠ {{ w }}</div>{% endfor %}
+  {% if r.dry_run %}{{ dry_run(r.dry_run) }}{% endif %}
   <div class="row">
     <button class="btn" hx-post="/rules/{{ r.id }}/confirm" hx-target="#r{{ r.id }}" hx-swap="outerHTML">✅ Save</button>
     <button class="btn ghost" hx-post="/rules/{{ r.id }}/cancel" hx-target="#r{{ r.id }}" hx-swap="outerHTML">✖ Cancel</button>

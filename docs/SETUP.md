@@ -275,6 +275,42 @@ How rules run:
 - Every decision lists the rules that fired (`emaild explain "<subject words>"`, MCP `explain`). Reviewed decisions are never changed by a rule.
 - Editing a rule makes a new version that is off until you save it again.
 
+### Dry runs and suggested rules (slice 2)
+
+Apply migration 013 first: `emaild migrate`.
+
+Before you save a rule, its read-back shows what it would have done to the last 30 days of mail. You can also test any rule, or a new wording, without saving anything:
+
+```bash
+emaild rule add "Always archive emails from Acme Streaming"
+#  [12] Acme Streaming  (rule, waiting for you to confirm, v1, fired 0x)
+#       From Acme Streaming (offers@acme.example.com) → archive.
+#       In the last 30 days this rule matches 41 emails: 23 would be archived (currently 18 kept, 5 already
+#       archived). 2 security-flagged — left alone (security and one-time checks come first).
+#         · 2026-10-03  Acme Streaming — New this week: keep → archive
+#  Save this rule? [y/N]
+emaild rule test 12                   # an existing rule (id or a few words)
+emaild rule test "Anything from Riverside Rovers about the canteen roster goes to Needs attention" --days 60
+```
+
+- Counts compare the rule with each email's current verdict (your correction wins over emAIl's proposal). Emails you reviewed yourself and handled differently are flagged ("you reviewed 2 of these yourself and chose differently").
+- Spam, phishing, one-time codes and copies of an email decided in another mailbox are listed as left alone: rules never change them.
+- A rule with a condition needs the model. emAIl checks a small sample of the newest matching emails (8 for `rule test`, 5 in a read-back, 20 at most, set with `--sample`) and estimates the rest ("about 8 of 30 would be alerted (estimated from 8 checked)").
+- Telegram: `/rule test 12`; MCP: `dry_run_rule`; web: the Test button on each rule.
+
+emAIl also suggests rules from emails you've reviewed. When you keep handling a sender the same way, and emAIl got it wrong at least once, it proposes a rule:
+
+```bash
+emaild rule suggest
+#  [3] Acme Streaming: “Always archive emails from offers@acme.example.com”
+#       From offers@acme.example.com → archive.
+#       why: you archived 6 of 6 emails from offers@acme.example.com; emAIl proposed keep on 3 of them
+emaild rule suggest --accept 3        # creates the rule and turns it on
+emaild rule suggest --dismiss 3       # never suggest it again
+```
+
+Suggestions work per address, or per organisation domain when two or more of its addresses agree (never for free-mail domains). Senders with security, spam or one-time verdicts are never suggested. Suggestions refresh at most once a day and need no model. They show on the web Rules page (Save / Not now / Never), in Telegram (`/suggestrules`, ✅ Save / ✖ Never), in MCP (`rule_suggestions`, `accept_rule_suggestion`, `dismiss_rule_suggestion`), and as a 💡 line in the morning brief.
+
 ## Troubleshooting
 
 | Symptom | Fix |

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_rules.html" import rule_row %}
+{% from "_rules.html" import rule_row, suggestion %}
 {% block title %}Rules · emAIl{% endblock %}
 {% block content %}
 <h1>Rules</h1>
@@ -16,6 +16,13 @@
     anything from my accountant” · “guidance: I care less about conference marketing unless I'm speaking”</div>
 </form>
 <div id="proposal"></div>
+
+{% if suggestions %}
+<h2>Suggested</h2>
+<p class="muted">From emails you've reviewed: senders you always handle the same way. Save turns the rule on;
+  Never stops that suggestion coming back.</p>
+<div class="list">{% for sg in suggestions %}{{ suggestion(sg) }}{% endfor %}</div>
+{% endif %}
 
 <h2>Your rules</h2>
 {% if rules %}

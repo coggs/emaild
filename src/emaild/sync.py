@@ -371,6 +371,14 @@ def run_once(triage_enabled: bool = True) -> None:
                 log.info("user %s: scrubbed %s expired codes/links", ctx.user_id, scrubbed)
         except Exception:
             log.exception("user %s: triage step failed", ctx.user_id)
+        try:  # rule suggestions from reviewed decisions: at most once a day (no model calls)
+            from . import rules
+            with db.user_session(ctx) as conn:
+                res = rules.refresh_suggestions(conn, key=ctx.user_id)
+            if res and any(res.values()):
+                log.info("user %s: rule suggestions %s", ctx.user_id, res)
+        except Exception as e:
+            log.warning("user %s: rule suggestions skipped: %s", ctx.user_id, str(e)[:200])
 
 
 def run_forever() -> None:

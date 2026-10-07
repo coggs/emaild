@@ -285,3 +285,42 @@ def test_web_ask_fragment_renders_list_and_answer():
         user="u", page="home", waiting=0, status={"accounts": [], "embedding_backlog": 0},
         tstats={"decisions": 0, "waiting_review": 0, "agreement": None}, needs={"alerts": [], "awaiting_reply": []})
     assert 'hx-post="/ask"' in out
+
+
+ORG_ROWS = [("NSFC General Committee", "general.committee@nsfc.example.org", 12),
+            ("NSFC Treasurer", "treasurer@nsfc.example.org", 7),
+            ("NSFC Registrar", "registrar@mail.nsfc.example.org", 3),
+            ("Jo Bloggs", "jo@gmail.com", 4)]
+
+
+def test_group_word_means_whole_organisation():
+    m = query.pick_org("NSFC Committee", ORG_ROWS)
+    assert m["domains"] == ["nsfc.example.org"]                      # subdomain folded into the club's domain
+    assert "treasurer@nsfc.example.org" in m["addrs"] and "jo@gmail.com" not in m["addrs"]
+    q = query.Query(mode="list", topic="", sender="NSFC Committee", after=None, before=None, limit=5,
+                    sort="newest", account=None, original="messages from the NSFC committee")
+    assert "from NSFC Committee (anyone @nsfc.example.org)" in query.describe(q, m)
+
+
+def test_org_scope_never_free_mail_and_bare_name_needs_exact_label():
+    assert query.pick_org("Gmail team", [("Jo", "jo@gmail.com", 3)]) is None
+    assert query.pick_org("Matt", [("Shop", "offers@mattressworld.example.com", 9)]) is None   # not a person -> org
+    assert query.pick_org("NSFC", ORG_ROWS)["domains"] == ["nsfc.example.org"]
+
+
+def test_domain_filter_sql_uses_named_binds():
+    binds: dict = {}
+    sql = Filters(sender_domains=["nsfc.example.org"]).sql(binds)
+    assert ":f_sd0" in sql and ":f_ss0" in sql
+    assert binds["f_sd0"] == "%@nsfc.example.org" and binds["f_ss0"] == "%.nsfc.example.org"
+
+
+def test_specific_role_still_resolves_to_one_mailbox():
+    m = query.pick_sender("NSFC treasurer", ORG_ROWS)
+    assert m["addrs"] == ["treasurer@nsfc.example.org"]
+
+
+def test_org_scope_ignores_articles():
+    assert query.pick_org("the NSFC committee", ORG_ROWS)["domains"] == ["nsfc.example.org"]
+    q = query.quick_parse("messages from the NSFC Committee this week", date(2026, 10, 7))
+    assert q.sender and query.pick_org(q.sender, ORG_ROWS)["domains"] == ["nsfc.example.org"]
