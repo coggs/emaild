@@ -1,0 +1,11 @@
+.env
+secrets/*
+!secrets/README.md
+models/*
+!models/README.md
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.logs/

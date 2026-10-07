@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="muted">Signed in as {{ user }} · shadow mode · a control room, not an inbox.</p>
+<form class="card" hx-post="/ask" hx-target="#ask-result" hx-swap="innerHTML" hx-indicator="#ask-busy"
+      style="margin:16px 0 4px">
+  <div class="row" style="margin-top:0">
+    <input type="text" name="question" maxlength="500" autocomplete="off" aria-label="Ask your email"
+           placeholder="Ask your email: “last 5 emails from Matt” or “latest perks from JB Hi-Fi?”">
+    <button class="btn" type="submit">Ask</button>
+    <span id="ask-busy" class="htmx-indicator muted" style="font-size:13px">thinking…</span>
+  </div>
+  <div id="ask-result"></div>
+</form>
+<div id="status" hx-get="/fragments/status" hx-trigger="every 30s" hx-swap="innerHTML">
+{% include "status_fragment.html" %}
+</div>
+<p style="margin-top:24px"><a class="btn" href="/oauth/google/start">Link a Gmail account</a></p>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Review · emAIl{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:baseline;gap:12px">
+  <h1 style="margin-right:auto">Review</h1>
+  <form method="post" action="/triage/refresh"><button class="btn ghost" title="Re-check against the latest rules">↻ Refresh</button></form>
+</div>
+<p class="muted">Shadow mode: these are proposals, nothing has been done to your mailbox. Look-alike emails are grouped,
+so one verdict covers them all. A short reason teaches it fastest ("anything from my accountant is important").</p>
+{% for d in items %}
+<div class="card" id="d{{ d.decision_id }}">
+  <div class="top">
+    <span class="chip {{ d.action }}">{{ d.action }}</span>
+    <span class="chip {{ d.importance }}">{{ d.importance }}</span>
+    <span class="chip">{{ d.category }}</span>
+    {% if d.needs_reply %}<span class="chip">needs reply</span>{% endif %}
+    {% if d.group_size > 1 %}<span class="chip" style="font-weight:600">× {{ d.group_size }} similar</span>{% endif %}
+    <span class="muted" style="margin-left:auto;font-size:12px">{{ d.source }} · {{ "%.0f" % (d.confidence*100) }}% · {{ d.date[:16] }}</span>
+  </div>
+  <div class="subj" style="margin-top:6px">{{ d.subject }}</div>
+  {% if d.group_size > 1 and d.subjects|length > 1 %}
+  <div class="from">also: {% for s in d.subjects[1:] %}“{{ s[:70] }}”{% if not loop.last %}, {% endif %}{% endfor %}</div>
+  {% endif %}
+  <div class="from">{{ d.sender }}</div>
+  {% if d.summary and d.summary != d.subject %}<div style="margin-top:6px">{{ d.summary }}</div>{% endif %}
+  <div class="muted" style="font-size:13px;margin-top:4px">{{ d.reasons }}</div>
+  {% if d.conflict %}
+  <div class="err" style="margin-top:6px">⚠ You've decided this kind of email both ways before:
+    {% for a, n in d.past_verdicts.items() %}{{ a }} {{ n }}×{% if not loop.last %}, {% endif %}{% endfor %}. Which should it be from now on?</div>
+  {% elif d.past_verdicts %}
+  <div class="muted" style="font-size:12px;margin-top:4px">Before: {% for a, n in d.past_verdicts.items() %}{{ a }} {{ n }}×{% endfor %}</div>
+  {% endif %}
+  <form class="row" hx-post="/triage/{{ d.decision_id }}" hx-target="#d{{ d.decision_id }}" hx-swap="outerHTML">
+    <input type="hidden" name="ids" value="{{ d.decision_ids[1:] | join(',') }}">
+    <button class="btn" name="verdict" value="approve">✓ Right{% if d.group_size > 1 %} (all {{ d.group_size }}){% endif %}</button>
+    <select name="action" aria-label="action">
+      <option value="">action…</option>{% for a in actions %}<option value="{{ a }}">{{ a }}</option>{% endfor %}
+    </select>
+    <select name="importance" aria-label="importance">
+      <option value="">importance…</option>{% for i in importances %}<option value="{{ i }}">{{ i }}</option>{% endfor %}
+    </select>
+    <input type="text" name="reason" placeholder="why? (optional, but it learns from this)">
+    <button class="btn ghost" name="verdict" value="correct">Correct</button>
+    <a class="muted" style="font-size:13px" href="/item/{{ d.item_id }}" target="_blank">show original</a>
+  </form>
+</div>
+{% else %}
+<p class="muted" style="margin-top:30px">Nothing waiting for review. 🎉</p>
+{% endfor %}
+{% if held %}
+<details style="margin-top:34px">
+  <summary class="muted" style="cursor:pointer">🛡 Held back — {{ held|length }} spam / phishing emails kept out of your way (last 14 days)</summary>
+  {% for h in held %}
+  <div class="card" id="h{{ h.decision_id }}" style="opacity:.85">
+    <div class="top"><span class="chip">{{ h.category }}</span>
+      <span class="muted" style="margin-left:auto;font-size:12px">{{ h.date[:16] }}</span></div>
+    <div class="subj" style="margin-top:6px">{{ h.subject }}</div>
+    <div class="from">{{ h.sender }}</div>
+    <div class="muted" style="font-size:13px;margin-top:4px">{{ h.reasons }}</div>
+    {% if h.category == 'suspicious' %}
+    <div class="row"><button class="btn ghost" hx-post="/triage/{{ h.decision_id }}/not-phishing"
+         hx-target="#h{{ h.decision_id }}" hx-swap="outerHTML">Not phishing</button></div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,35 @@
+{% from "_needs.html" import rows %}
+<div class="grid">
+  <div class="tile"><span class="muted">Messages</span><b>{{ status.accounts | sum(attribute='items') }}</b></div>
+  <div class="tile"><span class="muted">Triaged</span><b>{{ tstats.decisions }}</b></div>
+  <div class="tile"><span class="muted">Waiting for you</span><b>{{ tstats.waiting_review }}</b></div>
+  <div class="tile"><span class="muted">Agreement</span><b>{{ "%d%%" % (tstats.agreement * 100) if tstats.agreement is not none else "—" }}</b></div>
+  <div class="tile"><span class="muted">Embedding backlog</span><b>{{ status.embedding_backlog }}</b></div>
+</div>
+{% if reco and (reco.unsubs or reco.followups) %}
+<a class="hint" href="/recommendations">{% if reco.unsubs %}🧹 {{ reco.unsubs }} unsubscribe suggestion{{ 's' if reco.unsubs != 1 }}{% endif %}{% if reco.unsubs and reco.followups %} · {% endif %}{% if reco.followups %}⏳ {{ reco.followups }} follow-up{{ 's' if reco.followups != 1 }}{% endif %} →</a>
+{% endif %}
+{% if codes %}
+<h2>🔑 Active sign-in codes</h2>
+<div class="list">{% for c in codes %}<div class="li"><b>{{ c.sender }}</b> — {{ c.subject }}
+  <span class="s">· expires in {{ c.mins_left }} min — open Gmail to use it</span></div>{% endfor %}</div>
+{% endif %}
+{% if needs and (needs.alerts or needs.awaiting_reply) %}
+<h2>🔔 Needs attention <span class="muted">(last 3 days)</span>
+  <button class="clear-all" hx-post="/needs/clear" hx-target="#status" hx-swap="innerHTML"
+          hx-confirm="Mark everything in Needs attention as seen?">Clear all</button></h2>
+{% if needs.alerts %}{{ rows(needs.alerts) }}{% else %}<p class="muted">No alerts.</p>{% endif %}
+{% if needs.awaiting_reply %}<h2>↩️ Waiting on your reply</h2>{{ rows(needs.awaiting_reply) }}{% endif %}
+{% else %}
+<p class="muted">Nothing needs you right now. 👌</p>
+{% endif %}
+<h2>Accounts</h2>
+<table>
+  <tr><th>Account</th><th>Status</th><th>Phase</th><th>Messages</th><th>Last sync (UTC)</th></tr>
+  {% for a in status.accounts %}
+  <tr><td>{{ a.address }}</td><td>{{ a.status }}{% if a.last_error %}<div class="err">{{ a.last_error[:160] }}</div>{% endif %}</td>
+      <td>{{ "incremental" if a.backfill_done else "backfilling" }}</td><td>{{ a['items'] }}</td><td>{{ a.last_sync_at or "—" }}</td></tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No accounts linked yet.</td></tr>
+  {% endfor %}
+</table>

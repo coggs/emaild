@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}emAIl{% endblock %}</title>
+<script src="https://unpkg.com/htmx.org@2.0.3"></script>
+<style>
+  :root { --bg:#f6f5f2; --fg:#1d1d1b; --muted:#6b6a66; --card:#fff; --line:#e4e2dc; --accent:#3b5bdb;
+          --bad:#c92a2a; --warn:#e8590c; --ok:#2b8a3e; --chip:#efeee9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --fg:#ecebe7; --muted:#9a9893; --card:#1e1e1c;
+          --line:#2e2d2a; --accent:#748ffc; --bad:#ff8787; --warn:#ffa94d; --ok:#69db7c; --chip:#2a2a27; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:900px; margin:0 auto; padding:28px 16px 60px; }
+  nav { display:flex; gap:18px; align-items:baseline; margin-bottom:6px; }
+  nav .brand { font-weight:700; font-size:20px; margin-right:auto; }
+  nav a { color:var(--muted); text-decoration:none; } nav a.on, nav a:hover { color:var(--fg); }
+  h1 { font-size:20px; margin:18px 0 4px; } .muted { color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:20px 0; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .tile b { display:block; font-size:26px; font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  td, th { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); font-size:14px; }
+  .btn { display:inline-block; border:0; cursor:pointer; background:var(--accent); color:#fff; padding:7px 13px;
+         border-radius:8px; text-decoration:none; font:inherit; font-size:14px; }
+  .btn.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .err { color:var(--bad); font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin:12px 0; }
+  .card .top { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .card .subj { font-weight:600; } .card .from { color:var(--muted); font-size:13px; }
+  .chip { display:inline-block; background:var(--chip); border-radius:999px; padding:1px 9px; font-size:12px; margin-right:4px; }
+  .chip.alert { background:var(--bad); color:#fff; } .chip.archive { opacity:.75; }
+  .chip.high { border:1px solid var(--warn); } .chip.on { background:var(--ok); color:#fff; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  select, input[type=text] { font:inherit; font-size:13px; padding:5px 8px; border-radius:7px; border:1px solid var(--line);
+         background:var(--bg); color:var(--fg); }
+  input[type=text] { flex:1; min-width:180px; }
+  .done { color:var(--ok); font-size:14px; padding:8px 2px; }
+  .list { background:var(--card); border:1px solid var(--line); border-radius:10px; margin:10px 0 18px; }
+  .list .li { padding:9px 14px; border-bottom:1px solid var(--line); font-size:14px; }
+  .needs-row { position:relative; padding-right:44px; }
+  .seen { position:absolute; right:10px; top:8px; border:1px solid var(--line); background:transparent; color:var(--muted);
+          border-radius:6px; padding:1px 8px; cursor:pointer; } .seen:hover { color:inherit; }
+  .clear-all { float:right; font-size:13px; font-weight:normal; border:1px solid var(--line); background:transparent;
+               color:var(--muted); border-radius:6px; padding:3px 10px; cursor:pointer; }
+  .list .li:last-child { border-bottom:0; } .list .li .s { color:var(--muted); font-size:13px; }
+  .reco { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .reco .who { flex:1; min-width:220px; } .reco .row { margin-top:0; }
+  .hint { display:inline-block; margin:6px 0 2px; color:var(--muted); text-decoration:none; font-size:14px; }
+  .hint:hover { color:var(--fg); }
+  h2 { font-size:15px; margin:22px 0 4px; }
+  pre.body { white-space:pre-wrap; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; font:14px/1.5 system-ui, sans-serif; }
+</style>
+</head>
+<body><main>
+<nav><span class="brand">emAIl</span>
+  <a href="/" class="{{ 'on' if page == 'home' }}">Status</a>
+  <a href="/brief" class="{{ 'on' if page == 'brief' }}">Brief</a>
+  <a href="/triage" class="{{ 'on' if page == 'triage' }}">Review{% if waiting %} ({{ waiting }}){% endif %}</a>
+  <a href="/recommendations" class="{{ 'on' if page == 'recommendations' }}">Recommendations</a>
+  <a href="/rules" class="{{ 'on' if page == 'rules' }}">Rules</a>
+  <a href="/telegram" class="{{ 'on' if page == 'telegram' }}">Telegram</a>
+</nav>
+{% block content %}{% endblock %}
+</main></body></html>

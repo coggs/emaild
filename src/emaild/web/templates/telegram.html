@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Telegram · emAIl{% endblock %}
+{% block content %}
+<h1>Telegram</h1>
+<p class="muted">Morning brief at {{ brief_time }} ({{ tz }}), alerts as they happen, review from your phone, and questions.
+Telegram chats aren't end-to-end encrypted, so the bot only sends summaries — never full emails.</p>
+{% if not configured %}
+<div class="card err">The bot isn't configured: set <code>EMAILD_TELEGRAM_TOKEN</code> in .env and redeploy.</div>
+{% endif %}
+{% if link %}
+<div class="card">✅ Linked (chat {{ link.chat_id }}) since {{ link.linked_at }} UTC{% if link.muted %} · 🔕 alerts muted{% endif %}
+  <form class="row" method="post" action="/telegram/settings">
+    <label class="muted" style="font-size:13px">Detail level</label>
+    <select name="detail_level">{% for l in levels %}<option value="{{ l }}" {{ 'selected' if l == link.detail_level }}>{{ l }}</option>{% endfor %}</select>
+    <button class="btn ghost">Save</button>
+    <button class="btn ghost" name="action" value="unlink" style="margin-left:auto">Unlink</button>
+  </form>
+  <p class="muted" style="font-size:13px">minimal: counts and sender names · summary: + subjects and one-line summaries · full: + emAIl's reasons</p>
+</div>
+{% else %}
+<p>Not linked yet. Open your bot in Telegram, then:</p>
+{% endif %}
+<div id="code"><button class="btn" hx-post="/telegram/code" hx-target="#code" hx-swap="innerHTML">{{ 'Re-link' if link else 'Get a link code' }}</button></div>
+{% endblock %}

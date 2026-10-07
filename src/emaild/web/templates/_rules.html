@@ -1,0 +1,41 @@
+{% macro status_label(r) -%}
+{%- if r.status == 'active' %}on{% elif r.status == 'paused' and r.paused_until %}off until {{ r.paused_until[:10] }}{% elif r.status == 'paused' %}off{% elif r.status == 'pending' %}not saved yet{% else %}{{ r.status }}{% endif -%}
+{%- endmacro %}
+
+{% macro rule_row(r) %}
+<div class="li reco" id="r{{ r.id }}">
+  <div class="who"><b>#{{ r.id }} {{ r.name }}</b>
+    <span class="chip{% if r.status == 'active' %} on{% endif %}">{{ status_label(r) }}</span>
+    {% if r.kind == 'guidance' %}<span class="chip">guidance</span>{% endif %}
+    <div>{{ r.readback }}</div>
+    <div class="s">{% if r.kind == 'rule' %}fired {{ r.fire_count or 0 }}×{% if r.last_fired_at %} · last {{ r.last_fired_at }} UTC{% endif %} · {% endif %}v{{ r.version }} · “{{ r.original_text }}”</div>
+  </div>
+  <div class="row">
+    {% if r.status == 'pending' %}
+    <button class="btn" hx-post="/rules/{{ r.id }}/confirm" hx-target="#r{{ r.id }}" hx-swap="outerHTML">Save</button>
+    {% elif r.status == 'active' %}
+    <form hx-post="/rules/{{ r.id }}/off" hx-target="#r{{ r.id }}" hx-swap="outerHTML" class="row" style="margin:0">
+      <input type="text" name="until" placeholder="until… (optional)" style="min-width:110px;flex:0 1 130px">
+      <button class="btn ghost">Turn off</button></form>
+    {% elif r.status == 'paused' %}
+    <button class="btn" hx-post="/rules/{{ r.id }}/on" hx-target="#r{{ r.id }}" hx-swap="outerHTML">Turn on</button>
+    {% endif %}
+    <button class="btn ghost" hx-post="/rules/{{ r.id }}/delete" hx-target="#r{{ r.id }}" hx-swap="outerHTML"
+            hx-confirm="Delete rule #{{ r.id }}?">Delete</button>
+  </div>
+</div>
+{% endmacro %}
+
+
+{% macro proposal(r) %}
+<div class="card" id="r{{ r.id }}">
+  <div class="top"><span class="subj">{{ 'Guidance' if r.kind == 'guidance' else 'Rule' }} #{{ r.id }}: {{ r.name }}</span>
+    <span class="chip">not saved yet</span></div>
+  <p style="margin:8px 0">{{ r.readback }}</p>
+  {% for w in r.warnings or [] %}<div class="err">⚠ {{ w }}</div>{% endfor %}
+  <div class="row">
+    <button class="btn" hx-post="/rules/{{ r.id }}/confirm" hx-target="#r{{ r.id }}" hx-swap="outerHTML">✅ Save</button>
+    <button class="btn ghost" hx-post="/rules/{{ r.id }}/cancel" hx-target="#r{{ r.id }}" hx-swap="outerHTML">✖ Cancel</button>
+  </div>
+</div>
+{% endmacro %}

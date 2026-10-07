@@ -1,0 +1,22 @@
+{# Result of the home-page ask box (query.run). Autoescaped; only subjects, senders and summaries are shown. #}
+{% if error %}<p class="err">Couldn't answer that: {{ error }}</p>
+{% elif res.mode == 'list' %}
+  {% if res['items'] %}
+  <h2>{{ head }}</h2>
+  <div class="list">
+  {% for it in res['items'] %}<div class="li">
+    <a href="/item/{{ it.item_id }}" target="_blank" style="color:inherit;text-decoration:none">
+      <span class="muted">{{ it.date }}</span> · <b>{{ it.subject }}</b></a>
+    <div class="s">{{ it.sender }}{% if it.summary and it.summary != it.subject %} — {{ it.summary }}{% endif %}</div>
+  </div>{% endfor %}
+  </div>
+  {% else %}<p class="muted">Nothing matched.</p>{% endif %}
+{% else %}
+  <div style="white-space:pre-wrap;margin:12px 0 6px">{{ res.answer }}</div>
+  {% if res.sources %}<div class="list">
+  {% for s in res.sources %}<div class="li"><a href="/item/{{ s.item_id }}" target="_blank"
+       style="color:inherit;text-decoration:none">[{{ s.n }}] <span class="muted">{{ (s.date or '')[:10] }}</span>
+       · {{ s['from'] }} — {{ s.subject }}</a></div>{% endfor %}
+  </div>{% endif %}
+{% endif %}
+{% if res and res.interpreted %}<p class="muted" style="font-size:13px;margin:4px 0 0"><i>Interpreted as: {{ res.interpreted }}</i></p>{% endif %}

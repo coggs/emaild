@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# emAIl command line for the host (WSL). Install once:  bash scripts/install-cli.sh
+#
+#   emaild <app command> [args]   runs inside the running api container (e.g. emaild brief, emaild protect --suggest)
+#   emaild up | down | ps          start / stop / list the stack
+#   emaild logs [service]          follow logs (worker by default): api worker mcp telegram db
+#   emaild redeploy [-v]           rebuild image, migrate, restart app containers (-v: show build output)
+#   emaild buildlog                full output of the last redeploy
+#   emaild help                    this help + the app's own command list
+set -euo pipefail
+REPO="${EMAILD_REPO:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+cd "$REPO"
+
+container() { podman ps --filter "name=emaild_$1_1" --filter status=running --format '{{.Names}}' | head -1; }
+
+case "${1:-help}" in
+  up)        podman compose up -d ;;
+  down)      podman compose down ;;
+  ps)        podman ps -a --filter name=emaild --format "table {{.Names}}\t{{.Status}}" ;;
+  logs)      podman logs -f --tail "${TAIL:-50}" "emaild_${2:-worker}_1" ;;
+  redeploy)  bash scripts/redeploy.sh "${2:-}" ;;
+  buildlog)  ${PAGER:-less} .logs/redeploy.log ;;
+  help|-h|--help)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    echo; echo "App commands:"
+    c=$(container api); if [ -n "$c" ]; then podman exec "$c" emaild --help | sed -n '/{/,$p'; fi ;;
+  *)
+    c=$(container api)
+    tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    if [ -n "$c" ]; then
+      exec podman exec "${tty[@]}" "$c" emaild "$@"
+    else
+      echo "(api container not running; using a one-off container)" >&2
+      exec podman compose run --rm --no-deps api "$@"
+    fi ;;
+esac

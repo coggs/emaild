@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ item.subject }} · emAIl{% endblock %}
+{% block content %}
+<h1>{{ item.subject }}</h1>
+<p class="muted">{{ item['from'] }} · {{ item.date[:16] }}{% if item.attachments %} · 📎 {{ item.attachments | map(attribute='filename') | join(', ') }}{% endif %}</p>
+{% if decision %}<p><span class="chip {{ decision.action }}">{{ decision.action }}</span><span class="chip">{{ decision.importance }}</span>
+<span class="chip">{{ decision.category }}</span> <span class="muted" style="font-size:13px">{{ decision.status }} · {{ decision.reasons }}</span></p>{% endif %}
+<pre class="body">{{ item.text }}</pre>
+<p class="muted" style="font-size:12px">Opening an original is logged — it's a signal that this kind of email matters to you.</p>
+{% endblock %}

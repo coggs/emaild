@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "_reco.html" import unsub_row, followup_row %}
+{% block title %}Recommendations · emAIl{% endblock %}
+{% block content %}
+<h1>Recommendations</h1>
+<p class="muted">Suggestions only — nothing happens until you press a button. emAIl never sends email.</p>
+
+<h2>🧹 Unsubscribe suggestions</h2>
+<p class="muted" style="font-size:13px;margin:0">List mail you never reply to and mostly file as noise.
+  <b>Unsubscribe</b> uses the sender's one-click endpoint; otherwise you get their link to open yourself.
+  Spam and suspicious senders are never listed (unsubscribing would confirm your address).</p>
+{% if unsubs %}
+<div class="list">{% for u in unsubs %}{{ unsub_row(u) }}{% endfor %}</div>
+{% else %}
+<p class="muted">Nothing to suggest right now. 👌</p>
+{% endif %}
+
+<h2>⏳ Follow-ups — waiting on others</h2>
+<p class="muted" style="font-size:13px;margin:0">Emails you sent {{ days_min }}–{{ days_max }} days ago that asked something, with no reply yet.</p>
+{% if followups %}
+<div class="list">{% for f in followups %}{{ followup_row(f) }}{% endfor %}</div>
+{% else %}
+<p class="muted">Nobody owes you a reply. 👌</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,42 @@
+{% macro unsub_row(u) %}
+<div class="li reco" id="u{{ u.id }}">
+  <div class="who"><b>{{ u.sender_name }}</b> <span class="s">{{ u.sender_addr }}</span>
+    <div class="s">{{ u.reason }} · last {{ u.last_received }}{% if u.status == 'failed' and u.detail %} · <span class="err">last try: {{ u.detail }}</span>{% endif %}</div></div>
+  <div class="row">
+    {% if u.method == 'one_click' %}
+    <button class="btn" hx-post="/recommendations/unsub/{{ u.id }}" hx-target="#u{{ u.id }}" hx-swap="outerHTML"
+            hx-confirm="Unsubscribe from {{ u.sender_addr }}?">Unsubscribe</button>
+    {% elif u.method == 'url' %}
+    {# the wrapper records the click (status 'manual'); the link itself opens normally #}
+    <span hx-post="/recommendations/unsub/{{ u.id }}" hx-trigger="click" hx-swap="none"><a class="btn"
+       href="{{ u.target }}" target="_blank" rel="noopener noreferrer">Open link</a></span>
+    {% else %}
+    <span hx-post="/recommendations/unsub/{{ u.id }}" hx-trigger="click" hx-swap="none"><a class="btn"
+       href="{{ u.target }}" rel="noopener noreferrer">Email to unsubscribe</a></span>
+    {% endif %}
+    <button class="btn ghost" hx-post="/recommendations/keep/{{ u.id }}" hx-target="#u{{ u.id }}"
+            hx-swap="outerHTML">Keep getting these</button>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro unsub_result(id, res) %}
+<div class="li" id="u{{ id }}">
+  {% if res.status == 'done' %}<span class="done">✓ Unsubscribed from {{ res.sender_addr }} — {{ res.detail }}</span>
+  {% elif res.status == 'dismissed' %}<span class="done">✓ Keeping {{ res.sender_addr }} — won't suggest again</span>
+  {% elif res.status == 'manual' %}<span class="done">Open this to finish: </span>
+    <a href="{{ res.link }}" target="_blank" rel="noopener noreferrer">{{ res.link[:80] }}</a>
+  {% else %}<span class="err">✗ {{ res.sender_addr }}: {{ res.detail }}</span>
+    {% if res.link %} · <a href="{{ res.link }}" target="_blank" rel="noopener noreferrer">open their page instead</a>{% endif %}
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro followup_row(f) %}
+<div class="li needs-row" id="f{{ f.item_id }}">
+  <button class="seen" title="Done - stop reminding me" hx-post="/recommendations/followup/{{ f.item_id }}/dismiss"
+          hx-target="#f{{ f.item_id }}" hx-swap="outerHTML">✓</button>
+  <a href="/item/{{ f.item_id }}" style="color:inherit;text-decoration:none" target="_blank"><b>{{ f.to }}</b> — {{ f.subject }}</a>
+  <div class="s">sent {{ f.sent_at }} UTC · waiting {{ f.days_waiting }} days</div>
+</div>
+{% endmacro %}

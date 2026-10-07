@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_rules.html" import rule_row %}
+{% block title %}Rules · emAIl{% endblock %}
+{% block content %}
+<h1>Rules</h1>
+<p class="muted">Tell emAIl how to handle mail, in your own words. Each rule is read back to you before it's saved;
+  every decision it makes says which rule fired. Security checks (spam, phishing, one-time codes) always come first.</p>
+
+<form class="card" hx-post="/rules" hx-target="#proposal" hx-swap="innerHTML">
+  <div class="row" style="margin-top:0">
+    <input type="text" name="text" maxlength="2000" required
+           placeholder="e.g. From Rugby Australia, alert me when tickets go on sale; archive the rest">
+    <button class="btn">Add a rule</button>
+  </div>
+  <div class="s muted" style="font-size:13px;margin-top:6px">More: “Always archive Strava emails” · “Never archive
+    anything from my accountant” · “guidance: I care less about conference marketing unless I'm speaking”</div>
+</form>
+<div id="proposal"></div>
+
+<h2>Your rules</h2>
+{% if rules %}
+<div class="list">{% for r in rules %}{{ rule_row(r) }}{% endfor %}</div>
+{% else %}
+<p class="muted">No rules yet.</p>
+{% endif %}
+{% endblock %}

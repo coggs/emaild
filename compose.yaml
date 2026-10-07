@@ -1,0 +1,51 @@
+# emAIl Phase 0 stack for rootless Podman inside WSL2 (podman-compose).
+# App containers use host networking: they share WSL's network, so Ollama (reachable from WSL at
+# localhost:11434) and the database's published port (localhost:1521) are plain localhost addresses.
+# WSL forwards localhost ports to Windows, so http://localhost:8080 works in your Windows browser.
+name: emaild
+
+x-app: &app
+  image: localhost/emaild:latest
+  build:
+    context: .
+    dockerfile: Containerfile
+  env_file: .env
+  restart: always
+  network_mode: host
+  depends_on: [db]
+  volumes:
+    - blobs:/data/blobs
+    - ./secrets:/run/emaild:ro
+
+services:
+  db:
+    image: container-registry.oracle.com/database/free:latest
+    restart: always
+    environment:
+      ORACLE_PWD: ${ORACLE_PWD}
+    ports:
+      - "127.0.0.1:1521:1521"
+    volumes:
+      # named volume = lives on the WSL ext4 filesystem (fast). Do NOT bind this to /mnt/d.
+      - oradata:/opt/oracle/oradata
+      - ./models:/opt/oracle/models:ro
+
+  api:
+    <<: *app
+    command: ["api"]          # listens on EMAILD_BIND_HOST:8080
+
+  worker:
+    <<: *app
+    command: ["worker"]
+
+  mcp:
+    <<: *app
+    command: ["mcp", "--transport", "http"]   # listens on EMAILD_BIND_HOST:8081
+
+  telegram:
+    <<: *app
+    command: ["telegram"]                     # long polling; no inbound port
+
+volumes:
+  oradata:
+  blobs:

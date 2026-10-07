@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "_needs.html" import rows %}
+{% block title %}Brief · emAIl{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:baseline;gap:12px">
+  <h1 style="margin-right:auto">Brief</h1>
+  <form method="post" action="/brief"><button class="btn ghost">Generate now</button></form>
+</div>
+{% if not b %}
+<p class="muted">No brief yet. The morning brief is created at the scheduled time (or press Generate now).</p>
+{% else %}
+<p class="muted">{{ b.received }} new · {{ b.period.since_local or b.period.since }} → {{ b.period.until_local or b.period.until }}
+  · {{ (b.by_action or {}).get('archive', 0) }} filed as noise{% if b.held_back %} · 🛡 {{ b.held_back }} spam/suspicious held back{% endif %}{% if b.codes_expired %} · 🔑 {{ b.codes_expired }} sign-in codes expired{% endif %}</p>
+{% if b.overview %}<div class="card">{{ b.overview }}</div>{% endif %}
+{% if b.alerts %}<h2>🔔 Needs attention</h2>{{ rows(b.alerts) }}{% endif %}
+{% if b.awaiting_reply %}<h2>↩️ Waiting on your reply</h2>{{ rows(b.awaiting_reply) }}{% endif %}
+{% if b.important %}<h2>📌 Worth knowing</h2>{{ rows(b.important) }}{% endif %}
+{% if b.waiting_on_others %}<h2>⏳ Waiting on others</h2>
+<div class="list">{% for f in b.waiting_on_others %}<div class="li"><a href="/item/{{ f.item_id }}" style="color:inherit;text-decoration:none" target="_blank"><b>{{ f.to }}</b> — {{ f.subject }}</a>
+  <span class="s">· {{ f.days_waiting }} days, no reply yet</span></div>{% endfor %}</div>{% endif %}
+{% if not (b.alerts or b.awaiting_reply or b.important) %}<p>Nothing needs you. 👌</p>{% endif %}
+{% if b.new_senders %}<h2>🆕 New senders</h2><p class="muted">{% for n in b.new_senders %}{{ n.sender }}{% if n.count > 1 %} ({{ n.count }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+{% if b.unsub_suggestions %}<p><a href="/recommendations">🧹 {{ b.unsub_suggestions }} lists you could unsubscribe from →</a></p>{% endif %}
+{% if b.waiting_review %}<p><a href="/triage">{{ b.waiting_review }} waiting for your review →</a></p>{% endif %}
+{% for p in b.account_problems or [] %}<p class="err">⚠ {{ p.account }}: {{ p.status }} {{ p.error }}</p>{% endfor %}
+{% endif %}
+{% endblock %}
