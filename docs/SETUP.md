@@ -199,14 +199,7 @@ emaild benchmark --model qwen3-coder:30b   # or try another Ollama model
 3. Run `bash scripts/redeploy.sh`. This applies migration 007 and starts the new `telegram` container.
 4. Open the **Telegram** page in emAIl, click **Get a link code**, then send `/link 123456` to your bot within 10 minutes.
 
-**Bot commands:**
-- `/brief`
-- `/review`: cards with ✅ Right / 🔔 Alert / 📌 Keep / 🗄 Archive. After a correction, reply with a reason.
-- `/status`
-- `/detail minimal|summary|full`
-- `/mute`, `/unmute`
-- `/unlink`
-- Any other message is treated as a question about your email.
+**Bot commands:** the full list, with examples, is in [TELEGRAM.md](TELEGRAM.md). The everyday ones are `/brief`, `/review`, `/needs`, `/status` and `/rule …`; any other message is treated as a question about your email.
 
 **Privacy:** Telegram bot chats are not end-to-end encrypted. The bot only sends summaries (sender, subject, a one-line summary, at your chosen detail level), never full emails. The **Open original** button links to your LAN-only web app.
 

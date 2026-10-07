@@ -9,6 +9,8 @@ An email client where you never see the email. An AI harness owns the inbox; you
 
 - Design spec: see the EmAIl project doc `emAIl-design-spec.md`
 - Setup on WSL2 (Ubuntu) + rootless Podman: [docs/SETUP.md](docs/SETUP.md)
+- Telegram bot commands: [docs/TELEGRAM.md](docs/TELEGRAM.md)
+- Feature backlog and command parity: [docs/FEATURES.md](docs/FEATURES.md)
 
 ## Layout
 

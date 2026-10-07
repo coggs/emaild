@@ -10,6 +10,7 @@ This is the backlog of features beyond the phased roadmap in the design spec. Ea
 | F4 | One command surface: CLI, MCP and Telegram parity | In progress (2026-10-07) | ongoing |
 | F5 | Trackers: status boards configured in plain language (orders, services, ticket releases…) | Proposed (2026-10-07); builds on rules (slices 1–2 done) | Phase 2 (rules) |
 | F6 | Generic IMAP connector (app passwords: iCloud, Fastmail, ISP mailboxes) | Possible later addition | after Phase 5 |
+| F7 | Draft emails (never sent): emAIl writes, you send from your own mail app | Proposed (2026-10-07) | Phase 6 (drafts) |
 
 **Phase 5, Outlook.com (2026-10-07): delivered** through Microsoft Graph (`src/emaild/channels/outlook.py`). Read-only `Mail.Read` over OAuth (auth code + PKCE, `consumers` authority). It uses per-folder delta sync for Inbox, Sent, Junk and Archive, and fetches raw MIME through the same parser as Gmail. Outlook state is mapped onto the Gmail label names, so triage, search and briefs work unchanged. Setup is in `docs/SETUP.md` (5b). A generic IMAP connector (F6) could later cover providers that still allow app passwords (iCloud, Fastmail, many ISPs). Outlook.com can't use it because Microsoft turned off basic auth there in September 2024.
 
@@ -143,3 +144,34 @@ Every operation should be available wherever you are: in a terminal, in an MCP c
 - It's built on Phase 2 rules and supersedes F1 as a one-off. Slice 1 of rules is in (2026-10-07): a tracker's *match* will reuse the compiled rule `match` and the pure matcher in `rules.py`, and the ticket-watch example already works as a plain rule (alert on sale / archive the rest) until the board exists.
 - The ticket watch also covers the "interest senders" stopgap discussed on 2026-10-07: senders you watch for something specific are read by Gemma rather than archived by the bulk shortcut.
 - Phase 3's fact extraction (e.g. keeping a favourite newsletter author's emails as a knowledge base) uses the same "narrow schema per email" pattern, but builds notes rather than a status board.
+
+
+---
+
+## F7. Draft emails (written by emAIl, never sent)
+
+**Idea:** ask in plain language — *"draft a reply to the club treasurer saying I can do the canteen on Saturday"*, *"draft a follow-up to the venue about the 14th"* — and emAIl writes the email. It lands as a **draft** you review, edit and send yourself. emAIl never sends anything.
+
+**Permissions: not possible with today's read-only access.** Creating a draft writes to the mailbox, so it needs one extra permission per provider:
+
+| Provider | Today | Needed for drafts | Notes |
+|---|---|---|---|
+| Gmail | `gmail.readonly` | `gmail.compose` | The narrowest Gmail scope that can create drafts. Google bundles "send" into the same scope, so "never send" is enforced in emAIl's code (it never calls the send endpoint), not by the permission itself. |
+| Outlook.com (Graph) | `Mail.Read` | `Mail.ReadWrite` | Lets emAIl create a draft (it also allows moving or deleting mail, again limited by code). **Sending needs the separate `Mail.Send`, which emAIl never requests**, so on Outlook drafts are send-proof by permission. |
+
+Adding a scope means re-linking each account once (consent screen). It should be opt-in per account (`EMAILD_DRAFTS=1`, plus a per-account toggle), so read-only stays the default.
+
+**Option A — no new permissions (can ship first):** emAIl keeps drafts in its own database and shows them on the dashboard, in Telegram and via MCP, with one-tap **"Open in Gmail"** / **"Open in Outlook"** links that open a pre-filled compose window (to, subject, body), plus Copy. Limitation: a pre-filled compose window starts a *new* email, so replies won't sit in the original thread.
+
+**Option B — real drafts in the mailbox (with the extra scope):** the draft appears in the account's Drafts folder, correctly threaded as a reply (In-Reply-To/References headers, same conversation), ready to send from any device.
+
+**How drafting would work (both options)**
+1. **Understand the request** with the query-understanding step: who it's to (resolved against senders you know), what it replies to (the right thread), and what to say.
+2. **Write it** with Gemma (local), using the thread for context and, later, examples of your own sent mail so it sounds like you (Phase 6, "in your voice"). Email content stays untrusted: instructions inside the emails being replied to are never followed.
+3. **Show it for approval** with a read-back (to, subject, first lines) and Edit / Regenerate / Save-as-draft / Discard. Nothing leaves emAIl until you choose.
+4. **Safety rails:** never auto-send (no send endpoint is ever called, and on Outlook the permission isn't even held); drafts only to addresses you've received mail from or typed explicitly; replies to anything flagged as phishing or suspicious are refused; every draft is audited.
+
+**Surfaces:** dashboard (Draft button on an email and a "New draft" box), Telegram (`/draft …`, plus "✍️ Draft reply" on alert cards), MCP (`draft_email`, `draft_reply(item_id, instructions)`), CLI (`emaild draft "..."`).
+
+**Relation to other plans:** this is the start of Phase 6 (drafts in your voice). Option A is independent of Phase 4's write access; Option B shares its re-consent step with F2 (deleting expired codes needs `gmail.modify` anyway — if both are wanted, `gmail.modify` covers drafts too, so one re-link would do).
+
