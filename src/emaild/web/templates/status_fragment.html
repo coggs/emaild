@@ -33,7 +33,7 @@
 <table>
   <tr><th>Account</th><th>Provider</th><th>Status</th><th>Phase</th><th>Messages</th><th>Last sync (UTC)</th></tr>
   {% for a in status.accounts %}
-  <tr><td>{{ a.address }}</td><td>{{ {"gmail": "Gmail", "outlook": "Outlook.com"}.get(a.provider, a.provider) }}</td><td>{{ a.status }}{% if a.last_error %}<div class="err">{{ a.last_error[:160] }}</div>{% endif %}</td>
+  <tr><td>{{ a.address }}</td><td>{{ {"gmail": "Gmail", "outlook": "Microsoft"}.get(a.provider, a.provider) }}{% if a.kind %} <span class="chip">{{ a.kind }}</span>{% endif %}</td><td>{{ a.status }}{% if a.last_error %}<div class="err">{{ a.last_error[:160] }}</div>{% endif %}</td>
       <td>{{ "incremental" if a.backfill_done else "backfilling" }}</td><td>{{ a['items'] }}</td><td>{{ a.last_sync_at or "—" }}</td></tr>
   {% else %}
   <tr><td colspan="6" class="muted">No accounts linked yet.</td></tr>

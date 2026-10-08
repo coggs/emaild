@@ -8,3 +8,12 @@ def _fresh_settings():
     config.settings.cache_clear()
     yield
     config.settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tracker_schema_probe():
+    """trackers caches whether migration 016's closed_reason column exists; each test probes its own fake DB."""
+    from emaild import trackers
+    trackers._REASON.clear()
+    yield
+    trackers._REASON.clear()

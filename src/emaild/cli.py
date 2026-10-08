@@ -19,7 +19,20 @@ def rules_intent(text: str) -> bool:
     return rules.parse_intent(text) is not None
 
 
-def print_query_result(res: dict) -> None:
+SHOW_HINT = "open one:  emaild show N   (whole email: emaild show N --full)"
+
+
+def remember_cli(conn, item_ids: list) -> None:
+    """The CLI's 'last list' for `emaild show N` (best effort; a no-op before migration 016)."""
+    from . import lists
+    try:
+        lists.remember(conn, "cli", "last", item_ids)
+    except Exception as e:
+        logging.getLogger(__name__).debug("could not remember list: %s", e)
+
+
+def print_query_result(res: dict, conn=None) -> None:
+    from .telegram import query_ids
     if res.get("interpreted"):
         print(f"Interpreted as: {res['interpreted']}\n")
     if res["mode"] == "list":
@@ -29,14 +42,17 @@ def print_query_result(res: dict) -> None:
             print("Nothing matched.")
             return
         print(headline(res))
-        for it in items:
+        for n, it in enumerate(items, 1):
             summ = it["summary"] if it["summary"] and it["summary"] != it["subject"] else ""
-            print(f"  [{it['item_id']}] {it['date']}  {it['sender']}\n      {it['subject']}"
+            print(f"  [{n}] {it['date']}  {it['sender']}  (email {it['item_id']})\n      {it['subject']}"
                   + (f"\n      {summ[:160]}" if summ else ""))
-        return
-    print(res["answer"], "\n")
-    for src in res["sources"]:
-        print(f"  [{src['n']}] {src['date'][:10]}  {src['from']}  —  {src['subject']}")
+    else:
+        print(res["answer"], "\n")
+        for src in res["sources"]:
+            print(f"  [{src['n']}] {src['date'][:10]}  {src['from']}  —  {src['subject']}")
+    if conn is not None and query_ids(res):
+        remember_cli(conn, query_ids(res))
+        print(f"\n{SHOW_HINT}")
 
 
 def print_rule(rule: dict) -> None:
@@ -244,12 +260,58 @@ def print_tracker(t: dict, dry: dict | None = None) -> None:
             print(f"       · {e['title'][:70]}: {e['state'].replace('_', ' ')}")
 
 
-def print_tracker_status(ans: dict) -> None:
+def print_tracker_status(ans: dict, conn=None) -> None:
+    from .telegram import numbered_lines
     print(ans["title"])
-    for line in ans["lines"]:
-        print(f"  • {line}")
+    lines, ids = numbered_lines(ans["lines"], ans.get("item_ids") or [])
+    for line in lines:
+        print(f"  {line}")
     if ans.get("hint"):
         print(f'  try:  emaild tracker add "{ans["hint"]}"')
+    if conn is not None and ids:
+        remember_cli(conn, ids)
+        print(f"\n{SHOW_HINT}")
+
+
+def run_show(a) -> None:
+    """`emaild show N [--full|--thread]` against the last CLI list, or `emaild show --item ID`."""
+    from . import db, lists, projects, show, users
+    from .llm.router import Router
+    ctx = users.resolve()
+    with db.user_session(ctx) as conn:
+        item_id = a.item
+        if item_id is None:
+            if a.n is None:
+                print("give a number from the last list (emaild show 3) or --item ID")
+                return
+            try:
+                item_id = lists.resolve(conn, "cli", a.n, "last")
+            except lists.Unavailable as e:
+                print(e)
+                return
+            if item_id is None:
+                print(f"no [{a.n}] in the last list - run a list first (emaild needs, emaild ask \"...\")")
+                return
+        if a.thread:
+            ts = projects.thread_status(conn, item_id=item_id, router=Router())
+            print(ts["error"] if ts.get("error") else "\n".join(projects.thread_lines(ts)))
+            return
+        if a.full:
+            res = show.full(conn, item_id, actor="cli", max_parts=1, size=show.MCP_CHARS)
+            if res is None:
+                print("not found")
+            elif res.get("refused"):
+                print(res["message"])
+            else:
+                print(f"{res['subject']}\nfrom {res['from']}\n{res['date']}")
+                if res["attachments"]:
+                    print("attachments: " + ", ".join(res["attachments"]))
+                print("\n" + "\n".join(res["parts"]))
+                if res["truncated"]:
+                    print(f"\n... truncated - open it on the dashboard: /item/{item_id}")
+            return
+        c = show.card(conn, item_id, router=Router())
+        print("not found" if c is None else show.card_text(c))
 
 
 def run_tracker(a, stdin=None) -> None:
@@ -325,6 +387,20 @@ def run_tracker(a, stdin=None) -> None:
             if rows:
                 print("track one:  emaild tracker suggest --accept N    never again:  emaild tracker suggest --dismiss N")
             return
+        if a.op == "clear-old":
+            from .store import MigrationNeeded
+            t = trackers.find_tracker(conn, " ".join(args)) if args else None
+            if t is None or t["kind"] != "orders":
+                print("give an orders tracker id (from 'emaild trackers'):  emaild tracker clear-old 3 [--days 21]")
+                return
+            try:
+                n = trackers.clear_old(conn, t["id"], a.days or trackers.CLEAR_OLD_DAYS, actor="cli")
+            except MigrationNeeded as e:
+                print(e)
+                return
+            print(f"closed {n} order{'s' if n != 1 else ''} with no news for {a.days or trackers.CLEAR_OLD_DAYS}+ days "
+                  f"(assumed delivered; a later email reopens one)")
+            return
         t = trackers.find_tracker(conn, " ".join(args)) if args else None
         if t is None:
             print(f"no tracker matches {' '.join(args)!r} (see 'emaild trackers')" if args else
@@ -336,7 +412,8 @@ def run_tracker(a, stdin=None) -> None:
             print_boards([b] if b else [], per_board=200)
             print(f"     {t['readback']}\n     your words: {t['original_text']}")
             for it in (b or {}).get("closed") or []:
-                print(f"     finished {it['closed_at'][:10]}  {it['label']:<14} {it.get('title') or ''}")
+                print(f"     finished {it['closed_at'][:10]}  {it['label']:<14} {it.get('title') or ''}"
+                      + (f"  (item {it['id']})" if it.get("id") else ""))
         elif a.op in ("on", "confirm"):
             ok = trackers.confirm(conn, tid, actor="cli")["active"] if t["status"] == "pending" else \
                 trackers.set_enabled(conn, tid, True, actor="cli")
@@ -528,6 +605,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("question")
     ap.add_argument("--raw", action="store_true", help="skip query understanding (search on the whole sentence)")
     sub.add_parser("status")
+    sh = sub.add_parser("show", help="open email [N] of the last list (ask, needs, brief, followups): a summary "
+                                     "card, --full for the whole email, --thread for where its conversation stands")
+    sh.add_argument("n", nargs="?", type=int)
+    sh.add_argument("--item", type=int, help="an email id instead of a list number")
+    sh.add_argument("--full", action="store_true", help="the whole email as plain text")
+    sh.add_argument("--thread", action="store_true", help="where its conversation stands")
     sub.add_parser("verify", help="compare the provider's message list for the backfill window with what is stored")
     sub.add_parser("rescan", help="re-run the backfill for all accounts (fetches only missing messages)")
     sub.add_parser("check-llm", help="verify the LLM endpoint and model are reachable")
@@ -579,11 +662,13 @@ def main(argv: list[str] | None = None) -> None:
     rs.add_argument("--all", action="store_true", help="include deleted rules")
     tk = sub.add_parser("tracker", help='trackers in plain words: add "<text>" [--yes] | show <id|words> | off <id> | '
                                          'on <id> | rm <id> | test <id|"new tracker"> | edit <id> "<text>" | '
-                                         'suggest [--accept N | --dismiss N]')
-    tk.add_argument("op", choices=["add", "show", "off", "on", "rm", "test", "edit", "confirm", "suggest", "list"])
+                                         'suggest [--accept N | --dismiss N] | clear-old <id> [--days 21]')
+    tk.add_argument("op", choices=["add", "show", "off", "on", "rm", "test", "edit", "confirm", "suggest", "list",
+                                   "clear-old"])
     tk.add_argument("args", nargs="*", help="tracker text, or a tracker id (or a few words from it)")
     tk.add_argument("--yes", action="store_true", help="save without asking")
-    tk.add_argument("--days", type=int, default=None, help="with test: look back this many days (default 90)")
+    tk.add_argument("--days", type=int, default=None, help="with test: look back this many days (default 90); "
+                                                           "with clear-old: quiet for this many days (default 21)")
     tk.add_argument("--accept", type=int, help="with suggest: track suggestion N")
     tk.add_argument("--dismiss", type=int, help="with suggest: never suggest N again")
     sub.add_parser("trackers", help="your trackers' boards")
@@ -668,8 +753,17 @@ def main(argv: list[str] | None = None) -> None:
                     if intent and intent["op"] == "status":
                         ans = trackers.status_answer(conn, intent["kind"])
                         if not ans.get("hint"):       # tracking that kind: answer from the boards
-                            print_tracker_status(ans)
+                            print_tracker_status(ans, conn)
                             return
+                    elif intent and intent["op"] == "delivery":
+                        ans = trackers.delivery_answer(conn, intent.get("who"), intent.get("when"))
+                        if ans is not None:           # else: no orders tracker / nothing open - search the mail
+                            print_tracker_status({"title": ans["title"], "lines": [i["line"] for i in ans["items"]],
+                                                  "item_ids": [i["email_id"] for i in ans["items"]]}, conn)
+                            return
+                    elif intent and intent["op"] == "clear_old":
+                        print("close quiet orders with:  emaild tracker clear-old <tracker id> [--days 21]")
+                        return
                     elif intent and intent["op"] == "list":
                         print_boards(trackers.boards(conn))
                         return
@@ -696,9 +790,11 @@ def main(argv: list[str] | None = None) -> None:
                         print(f'that reads as a new project; add it with:  emaild project add "{pi["text"]}"')
                         return
                     res = query.run(conn, a.question, Router())
-                print_query_result(res)
+                print_query_result(res, conn)
             else:
                 print(json.dumps(store.status(conn), indent=2, default=str))
+    elif a.cmd == "show":
+        run_show(a)
     elif a.cmd == "telegram":
         from . import telegram
         telegram.run()
@@ -707,9 +803,13 @@ def main(argv: list[str] | None = None) -> None:
         ctx = users.resolve()
         with db.user_session(ctx) as conn:
             if a.cmd == "brief":
-                b = brief.generate(conn, ctx, kind="on_demand", hours=a.hours, delivered_via="cli")
+                import html as _html
                 import re as _re
-                print(_re.sub(r"<[^>]+>", "", brief.render_telegram(b)))
+                b = brief.generate(conn, ctx, kind="on_demand", hours=a.hours, delivered_via="cli")
+                ids: list[int] = []
+                text = brief.render_telegram(b, ids_out=ids).replace("/show N", "emaild show N")
+                print(_html.unescape(_re.sub(r"<[^>]+>", "", text)))
+                remember_cli(conn, ids)
             else:
                 print(f"Send this to your bot within 10 minutes:  /link {telegram.create_code(conn)}")
     elif a.cmd == "protect":
@@ -784,13 +884,19 @@ def main(argv: list[str] | None = None) -> None:
                     return
                 print(f"cleared {brief_mod.dismiss(conn, None if a.all else a.ids)}")
             ny = brief_mod.needs_you(conn, days=3, limit=50)
+            remember_cli(conn, [r["item_id"] for r in ny["alerts"] + ny["awaiting_reply"]])
+        n = 0
         for title, rows in (("Alerts", ny["alerts"]), ("Waiting on your reply", ny["awaiting_reply"])):
             if rows:
                 print(f"{title}:")
                 for r in rows:
-                    print(f"  [{r['decision_id']}] {r['received_at']}  {r['sender'][:30]:<30} {r['subject'][:60]}")
+                    n += 1
+                    print(f"  [{n}] {r['received_at']}  {r['sender'][:30]:<30} {r['subject'][:60]}"
+                          f"  (seen id {r['decision_id']})")
         if not (ny["alerts"] or ny["awaiting_reply"]):
             print("Nothing needs you.")
+        else:
+            print(f"\n{SHOW_HINT}\nclear one:  emaild seen <seen id>")
     elif a.cmd in ("unsubs", "unsub", "followups"):
         from . import db, recommend, users
         ctx = users.resolve()
@@ -810,10 +916,14 @@ def main(argv: list[str] | None = None) -> None:
                 if a.dismiss:
                     print("dismissed" if recommend.dismiss_nudge(conn, a.dismiss) else "not found (or not sent by you)")
                 rows = recommend.followup_nudges(conn, limit=50)
-                for r in rows:
-                    print(f"  [{r['item_id']}] {r['sent_at']}  {r['days_waiting']:>2}d  {r['to'][:30]:<30} {r['subject'][:60]}")
+                for n, r in enumerate(rows, 1):
+                    print(f"  [{n}] {r['sent_at']}  {r['days_waiting']:>2}d  {r['to'][:30]:<30} {r['subject'][:60]}"
+                          f"  (email {r['item_id']})")
                 if not rows:
                     print("Nobody owes you a reply.")
+                else:
+                    remember_cli(conn, [r["item_id"] for r in rows])
+                    print(f"\n{SHOW_HINT}\nstop reminding:  emaild followups --dismiss <email id>")
     elif a.cmd in ("refresh", "security-sweep"):
         from . import sync, triage
         for ctx in sync.users_with_accounts():

@@ -6,7 +6,7 @@
   <div class="list">
   {% for it in res['items'] %}<div class="li">
     <a href="/item/{{ it.item_id }}" target="_blank" style="color:inherit;text-decoration:none">
-      <span class="muted">{{ it.date }}</span> · <b>{{ it.subject }}</b></a>
+      <span class="muted">[{{ loop.index }}] {{ it.date }}</span> · <b>{{ it.subject }}</b></a>
     <div class="s">{{ it.sender }}{% if it.summary and it.summary != it.subject %} — {{ it.summary }}{% endif %}</div>
   </div>{% endfor %}
   </div>

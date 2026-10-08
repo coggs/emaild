@@ -15,5 +15,9 @@
 {% include "status_fragment.html" %}
 </div>
 <p style="margin-top:24px"><a class="btn" href="/oauth/google/start">Link a Gmail account</a>
-  <a class="btn" href="/oauth/microsoft/start">Link an Outlook account</a></p>
+  <a class="btn" href="/oauth/microsoft/start?kind=personal">Link personal Outlook</a>
+  {% if ms_work %}<a class="btn ghost" href="/oauth/microsoft/start?kind=work"
+     title="Your organisation's IT may need to approve emAIl (read-only Mail.Read) before this works">Link work or school account (Microsoft 365)</a>{% endif %}</p>
+{% if ms_work %}<p class="muted" style="font-size:13px">Work or school accounts: your IT team may need to approve emAIl
+  first (admin consent for read-only mail access), and the account uses local models only by default.</p>{% endif %}
 {% endblock %}

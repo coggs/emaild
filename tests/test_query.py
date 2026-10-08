@@ -241,7 +241,8 @@ def _list_res(n):
 def test_telegram_list_rendering_escapes_and_caps_buttons():
     text, kb = telegram.render_query_result(_list_res(8), lambda i: f"https://e.x/item/{i}")
     assert "📬 <b>Last 8 from Matt &lt;M&gt;</b>" in text
-    assert "• 3 Oct · &lt;b&gt;Hi 0&lt;/b&gt; — a &amp; b" in text and "<b>Hi" not in text
+    # list items are numbered ([n] replaced the bullet) so /show N can open one
+    assert "[1] 3 Oct · &lt;b&gt;Hi 0&lt;/b&gt; — a &amp; b" in text and "<b>Hi" not in text
     assert "Interpreted as: list · from &lt;Matt&gt;" in text
     assert len(kb["inline_keyboard"]) == 5 and kb["inline_keyboard"][0][0]["url"] == "https://e.x/item/0"
     _, kb = telegram.render_query_result(_list_res(2), lambda i: None)

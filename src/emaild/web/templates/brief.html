@@ -12,11 +12,11 @@
 <p class="muted">{{ b.received }} new · {{ b.period.since_local or b.period.since }} → {{ b.period.until_local or b.period.until }}
   · {{ (b.by_action or {}).get('archive', 0) }} filed as noise{% if b.held_back %} · 🛡 {{ b.held_back }} spam/suspicious held back{% endif %}{% if b.codes_expired %} · 🔑 {{ b.codes_expired }} sign-in codes expired{% endif %}</p>
 {% if b.overview %}<div class="card">{{ b.overview }}</div>{% endif %}
-{% if b.alerts %}<h2>🔔 Needs attention</h2>{{ rows(b.alerts) }}{% endif %}
-{% if b.awaiting_reply %}<h2>↩️ Waiting on your reply</h2>{{ rows(b.awaiting_reply) }}{% endif %}
-{% if b.important %}<h2>📌 Worth knowing</h2>{{ rows(b.important) }}{% endif %}
+{% if b.alerts %}<h2>🔔 Needs attention</h2>{{ rows(b.alerts, nums) }}{% endif %}
+{% if b.awaiting_reply %}<h2>↩️ Waiting on your reply</h2>{{ rows(b.awaiting_reply, nums) }}{% endif %}
+{% if b.important %}<h2>📌 Worth knowing</h2>{{ rows(b.important, nums) }}{% endif %}
 {% if b.waiting_on_others %}<h2>⏳ Waiting on others</h2>
-<div class="list">{% for f in b.waiting_on_others %}<div class="li"><a href="/item/{{ f.item_id }}" style="color:inherit;text-decoration:none" target="_blank"><b>{{ f.to }}</b> — {{ f.subject }}</a>
+<div class="list">{% for f in b.waiting_on_others %}<div class="li"><a href="/item/{{ f.item_id }}" style="color:inherit;text-decoration:none" target="_blank">{% if nums and nums.get(f.item_id) %}<span class="muted">[{{ nums.get(f.item_id) }}]</span> {% endif %}<b>{{ f.to }}</b> — {{ f.subject }}</a>
   <span class="s">· {{ f.days_waiting }} days, no reply yet</span></div>{% endfor %}</div>{% endif %}
 {% if b.trackers %}<h2>📋 Trackers</h2>
 <div class="list">{% for line in b.trackers %}<div class="li">{{ line }}</div>{% endfor %}</div>
@@ -25,7 +25,7 @@
 <div class="list">{% for line in b.projects %}<div class="li">{{ line }}</div>{% endfor %}</div>
 <p><a href="/projects" class="hint">All projects →</a></p>{% endif %}
 {% if not (b.alerts or b.awaiting_reply or b.important) %}<p>Nothing needs you. 👌</p>{% endif %}
-{% if b.new_senders %}<h2>🆕 New senders</h2><p class="muted">{% for n in b.new_senders %}{{ n.sender }}{% if n.count > 1 %} ({{ n.count }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+{% if b.new_senders %}<h2>🆕 New senders</h2><p class="muted">{% for n in b.new_senders %}{% if n.item_id %}<a href="/item/{{ n.item_id }}" target="_blank" style="color:inherit">{% if nums and nums.get(n.item_id) %}[{{ nums.get(n.item_id) }}] {% endif %}{{ n.sender }}</a>{% else %}{{ n.sender }}{% endif %}{% if n.count > 1 %} ({{ n.count }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
 {% if b.unsub_suggestions %}<p><a href="/recommendations">🧹 {{ b.unsub_suggestions }} lists you could unsubscribe from →</a></p>{% endif %}
 {% if b.tracker_suggestions %}<p><a href="/trackers">📋 {{ b.tracker_suggestions }} tracker suggestion{{ 's' if b.tracker_suggestions != 1 }} →</a></p>{% endif %}
 {% if b.waiting_review %}<p><a href="/triage">{{ b.waiting_review }} waiting for your review →</a></p>{% endif %}

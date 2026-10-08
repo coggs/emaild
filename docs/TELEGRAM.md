@@ -11,7 +11,7 @@ The same operations are available on the dashboard, the `emaild` command line an
 |---|---|
 | `/brief` | A brief of what's come in since the last one. The morning brief also arrives on its own at `EMAILD_BRIEF_TIME`. |
 | `/status` | Sync and triage at a glance: accounts, messages, how many proposals are waiting for you. |
-| `/needs` | What needs you: alerts, plus emails still waiting on your reply. |
+| `/needs` | What needs you: alerts, plus emails still waiting on your reply, numbered — `/show 2` opens one. |
 | `/seen` | Clear everything from Needs attention (your triage verdicts are unchanged). Or tap **👁 Seen** on a single alert. |
 
 ## Ask your email
@@ -20,11 +20,25 @@ No command needed — just type. emAIl works out the sender, dates, newest vs mo
 
 | You type | You get |
 |---|---|
-| `last 5 emails from Sam Taylor` | A list, newest first, with a one-line summary and an **🔎 Open** button for each. Dates work too: "anything from the school this week", "emails from Sam in August". |
+| `last 5 emails from Sam Taylor` | A numbered list ([1], [2], …), newest first, with a one-line summary and an **🔎 Open** button for each. Dates work too: "anything from the school this week", "emails from Sam in August". `/show 2` opens one (see [Opening emails](#opening-emails)). |
 | `what are the latest offers from Acme Streaming?` | An answer written from the newest matching emails, with sources. |
 | `messages from the NSFC committee` | Group words (committee, team, office, board, staff…) mean everyone at that organisation's domain, not one mailbox. |
 
 Spam, suspicious mail and one-time codes are never included.
+
+## Opening emails
+
+Every message that lists emails numbers them **[1], [2], …** — question results and answer sources, `/brief` (one running numbering for the whole brief), `/needs`, `/followups`, delivery answers and tracker boards (each item's latest email), and project or thread status citations. Each list remembers its own numbers, so you can come back to an older one.
+
+| You send | You get |
+|---|---|
+| `/show 3` | A summary card for email [3] of the last list: subject, sender, date (your time zone), what it says, and key details pulled from it — dates and times, amounts, how many links and their first three domains (never the links themselves), attachment names. Buttons: **📄 Full email · 🧵 Thread · 🔎 Open** (Open only when the dashboard is on https). |
+| `/show 3 full` | The whole email as plain text, split over at most 3 messages; longer ones end with "truncated — open on dashboard". Attachments are listed by name, never sent. |
+| `/thread 3` | Where that email's conversation stands (who's waiting on whom, decisions, open asks, dates). |
+| *reply* `3` · `show 3` · `full 3` · `thread 3` | Reply to any list message to pick from **that** list, even an older one. |
+| `3` *(no reply)* | Opens [3] of the latest list, but only if that list is less than 30 minutes old; otherwise it's treated as a normal question. |
+
+The whole email is refused for spam, suspicious, one-time-code and security-held mail (and expired codes emAIl has scrubbed), and at `/detail minimal` — `/detail summary` allows it. Every full view is logged.
 
 ## Review
 
@@ -66,7 +80,12 @@ Boards for orders, service status and ticket sales, set up in plain words. Each 
 | `/tracker test 2` | What tracker 2 finds in the last 90 days, changing nothing. `/tracker test <tracker in words>` tests one you haven't saved. |
 | *(automatic)* | Changes that matter arrive on their own, e.g. "📦 Acme Shop order 123-456: **shipped** (expected Fri)", "🟢 Example VPN: **recovered** (was down)", a reminder on the morning a sale opens. Quiet hours and `/mute` apply. |
 
-Plain words work too: "track my Acme Shop orders", "what's still in transit?", "is everything up?", "any tickets going on sale soon?", "show my trackers". If you're not tracking that kind of thing, the question goes to your email as usual.
+| `/tracker 2 clear old` | Close tracker 2's open orders with no news for 21+ days, as *assumed delivered* (`/tracker 2 clear old 30` for another number of days). A later email about one puts it back. |
+| **✅ Delivered** | Under delivery answers and `/tracker show`: you got it — the order leaves the board. |
+
+Plain words work too: "track my Acme Shop orders", "what's still in transit?", "is everything up?", "any tickets going on sale soon?", "show my trackers", "close the old Acme Shop orders". If you're not tracking that kind of thing, the question goes to your email as usual.
+
+Delivery and order questions — "when is my Acme Shop delivery due?", "when will my parcel arrive?", "has my order shipped?", "where's my package?", "any deliveries today?", "what orders are pending?" — are answered from your **open** orders (just that retailer's when you name one), soonest expected first, numbered, with the state, expected date, last update and a ⚠ when one has gone quiet. A question about something that's no longer on the board ("when did the bike pump arrive?") goes to your email instead. Orders that never got a delivery email leave the board on their own after a while, as *assumed delivered (no confirmation email)*, without a notification.
 
 ## Projects
 
@@ -76,7 +95,7 @@ Projects group the mail of something you're involved in. An *umbrella* is ongoin
 |---|---|
 | `/project add <what>` | Create a project (**✅ Save / ✖ Cancel**). e.g. `/project add Create a project for the NSFC committee, everything from nsfc.example.org`, `/project add Add a sub-project under NSFC: presentation night`, `/project add Track my kitchen renovation with the builder at builder.example.com` |
 | `/projects` | Your umbrellas and sub-projects: open asks, the next date, last activity. Suggested sub-projects follow (**✅ Create / ✖ Never**). |
-| `/project NSFC` | Where a project stands: sub-project one-liners and general business (umbrella) or asks / deadlines / commitments / decisions / open questions (sub-project), upcoming dates, who's waiting on whom, and a short overview written from the facts. `[email 123]` cites the email; open it on the dashboard. |
+| `/project NSFC` | Where a project stands: sub-project one-liners and general business (umbrella) or asks / deadlines / commitments / decisions / open questions (sub-project), upcoming dates, who's waiting on whom, and a short overview written from the facts. Each fact cites its email as [1], [2], …; `/show 1` opens it. |
 | `/project done NSFC` · `/project archive NSFC` · `/project rm NSFC` · `/project on NSFC` | Mark done, archive (filing stops, history stays), delete (sub-projects move up a level), or reopen. |
 
 Plain words work too: "status of presentation night", "where are we with the kitchen renovation?", "what's happening with NSFC?", "show my projects", "add a sub-project under NSFC: uniform order". If no project has that name, emAIl finds the best-matching email thread and tells you where *it* stands instead. Only facts and summaries are sent here, never the emails themselves.
@@ -96,7 +115,7 @@ Plain words work too: "status of presentation night", "where are we with the kit
 | Command | What it does |
 |---|---|
 | `/unsubs` | Lists you could unsubscribe from (**🧹 Unsubscribe / Keep**). Never automatic, never for spam or phishing. |
-| `/followups` | Emails you sent that are still waiting on a reply (**✓ Done**). |
+| `/followups` | Emails you sent that are still waiting on a reply, numbered, with a **✓ Done** button each. |
 
 ## Settings
 
@@ -125,4 +144,4 @@ Nothing to type — these appear on cards the bot sends.
 
 ## Privacy
 
-Telegram bot chats are not end-to-end encrypted. The bot only sends summaries (sender, subject, a one-line summary, at your `/detail` level) — never full emails, and never one-time codes unless you opt in.
+Telegram bot chats are not end-to-end encrypted. The bot sends summaries (sender, subject, a one-line summary, at your `/detail` level). A whole email is sent only when you explicitly ask for it (`/show N full` or **📄 Full email**); it is refused for spam, suspicious, one-time-code and security-held mail, and at `/detail minimal`, and every full view is logged. Attachments are never sent, and one-time codes only if you opt in.

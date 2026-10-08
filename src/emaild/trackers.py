@@ -55,6 +55,14 @@ SUGGEST_MIN = 3
 SUGGEST_DAYS = 60
 SUGGEST_REFRESH_SECONDS = 86400
 ORDER_WORDS = ["order", "shipped", "dispatched", "despatched", "delivered", "out for delivery", "tracking number"]
+# Orders that go quiet: retailers rarely confirm delivery, so an order nobody hears about again would sit on the
+# board forever. It leaves as "assumed delivered" (silently; a later email about it reopens it):
+ASSUME_AFTER_EXPECTED_DAYS = 21   # no update for this long past its expected delivery date
+ASSUME_QUIET_DAYS = 30            # no expected date: no update for this long (also: older on the first fill)
+CLEAR_OLD_DAYS = 21               # "/tracker 3 clear old" default: open orders not heard about for this long
+ASSUMABLE_STATES = ("ordered", "shipped", "out_for_delivery", "delayed")   # not problem / return: those need you
+CLOSED_LABELS = {"assumed_delivered": "assumed delivered (no confirmation email)",
+                 "marked": "delivered (marked by you)"}
 
 # Built-in kinds. `states` progress forward only (rank = position); `side` states may happen at any time.
 KINDS: dict[str, dict] = {
@@ -680,6 +688,53 @@ def should_close(sp: dict, state: str, last_changed, now: datetime) -> bool:
     return n is not None and (n == 0 or (lc is not None and now - lc >= timedelta(days=n)))
 
 
+def assumed_delivered(sp: dict, state: str, last_update, fields: dict | None, now: datetime) -> bool:
+    """An open order that has gone quiet: no update ASSUME_AFTER_EXPECTED_DAYS past its expected date, or (without
+    one) ASSUME_QUIET_DAYS since the last update. Only in-progress order states; never problems or returns."""
+    if sp.get("kind") != "orders" or state not in ASSUMABLE_STATES:
+        return False
+    lu = _naive(last_update)
+    if lu is None:
+        return False
+    exp = parse_when((fields or {}).get("expected_date"))
+    if exp is not None:
+        return now - max(exp, lu) >= timedelta(days=ASSUME_AFTER_EXPECTED_DAYS)
+    return now - lu >= timedelta(days=ASSUME_QUIET_DAYS)
+
+
+def aged_on_fill(sp: dict, state: str, occurred, fields: dict | None, now: datetime) -> bool:
+    """First sighting (backfill / first fill) of an order whose latest news is already ASSUME_QUIET_DAYS old: it
+    starts closed. An expected date still in the future keeps it open (long lead times)."""
+    if sp.get("kind") != "orders" or state not in ASSUMABLE_STATES:
+        return False
+    occ = _naive(occurred)
+    exp = parse_when((fields or {}).get("expected_date"))
+    if exp is not None and exp >= now:
+        return False
+    return assumed_delivered(sp, state, occ, fields, now) or (occ is not None and
+                                                               now - occ >= timedelta(days=ASSUME_QUIET_DAYS))
+
+
+_REASON: dict[str, float] = {}
+_REASON_RETRY = 300
+
+
+def has_closed_reason(conn) -> bool:
+    """tracker_items.closed_reason exists (migration 016). Before it, nothing ages out: the board behaves exactly as
+    before. A positive answer is cached for good; a negative one is re-checked every few minutes."""
+    if _REASON.get("ok"):
+        return True
+    if time.monotonic() - _REASON.get("checked", -1e12) < _REASON_RETRY:
+        return False
+    _REASON["checked"] = time.monotonic()
+    try:
+        conn.cursor().execute("SELECT closed_reason FROM tracker_items WHERE 1 = 0")
+    except oracledb.DatabaseError:
+        return False
+    _REASON["ok"] = 1.0
+    return True
+
+
 def stalled(sp: dict, state: str, last_changed, now: datetime) -> str | None:
     """Computed, never stored: 'shipped 11 days ago, no delivery update'."""
     n = sp.get("stall", {}).get(state)
@@ -867,7 +922,8 @@ def status_text(t: dict) -> str:
 
 def _item_row(r) -> dict:
     return {"id": int(r[0]), "item_key": r[1], "title": r[2], "state": r[3], "state_rank": int(r[4] or 0),
-            "last_changed_at": r[5], "closed_at": r[6], "fields": _json(r[7]) or {}}
+            "last_changed_at": r[5], "closed_at": r[6], "fields": _json(r[7]) or {},
+            "closed_reason": r[8] if len(r) > 8 else None}
 
 
 def _fresh(occurred: datetime | None, now: datetime) -> bool:
@@ -881,8 +937,10 @@ def apply_extraction(conn, tracker: dict, email_id: int | None, ext: dict, now: 
     c = compiled_of(tracker)
     sp = spec_for(c)
     tid = int(tracker["id"])
+    reasons = has_closed_reason(conn)
     cur = conn.cursor()
-    cur.execute("""SELECT id, item_key, title, state, state_rank, last_changed_at, closed_at, fields
+    cur.execute(f"""SELECT id, item_key, title, state, state_rank, last_changed_at, closed_at, fields
+                           {", closed_reason" if reasons else ""}
                      FROM tracker_items WHERE tracker_id = :tid AND (item_key = :k OR closed_at IS NULL)
                     ORDER BY CASE WHEN item_key = :k THEN 0 ELSE 1 END, last_heard_at DESC NULLS LAST
                     FETCH FIRST 200 ROWS ONLY""", {"tid": tid, "k": ext["item_key"]})
@@ -891,35 +949,54 @@ def apply_extraction(conn, tracker: dict, email_id: int | None, ext: dict, now: 
     occ = ext.get("occurred_at") or now
     step = transition(sp, hit, ext["state"], occ)
     notify = step.notify and _fresh(occ, now) and tracker.get("status", "active") == "active"
-    closed = None
+    fields = (ext["fields"] if hit is None else
+              {**(hit.get("fields") or {}), **ext["fields"]} if step.outcome != "stale" else hit.get("fields"))
+    closed, reason = None, None
     if step.outcome == "change" and should_close(sp, step.state, occ, now):
         closed = now
+    elif reasons and step.outcome == "change" and (
+            aged_on_fill(sp, step.state, occ, fields, now) if hit is None
+            else assumed_delivered(sp, step.state, occ, fields, now)):
+        closed, reason, notify = now, "assumed_delivered", False        # aged-out closes never notify
+    # an order assumed delivered comes back on any newer email about it (a change reopens any closed item)
+    revive = (hit is not None and hit.get("closed_at") is not None and hit.get("closed_reason") == "assumed_delivered"
+              and step.outcome == "repeat")
+    rsql = ", closed_reason = :reason" if reasons else ""
     if hit is None:
         out = cur.var(oracledb.NUMBER)
-        cur.execute("""INSERT INTO tracker_items (tracker_id, item_key, title, fields, state, state_rank,
-                                                  last_changed_at, last_heard_at, closed_at, last_email_id)
-                       VALUES (:tid, :k, :title, :f, :st, :rk, :occ, :occ, :closed, :eid) RETURNING id INTO :out""",
-                    {"tid": tid, "k": ext["item_key"], "title": ext["title"][:400], "f": json.dumps(ext["fields"]),
-                     "st": step.state, "rk": step.rank, "occ": occ, "closed": closed, "eid": email_id, "out": out})
+        binds = {"tid": tid, "k": ext["item_key"], "title": ext["title"][:400], "f": json.dumps(ext["fields"]),
+                 "st": step.state, "rk": step.rank, "occ": occ, "closed": closed, "eid": email_id, "out": out}
+        if reasons:
+            binds["reason"] = reason
+        cur.execute(f"""INSERT INTO tracker_items (tracker_id, item_key, title, fields, state, state_rank,
+                                                  last_changed_at, last_heard_at, closed_at, last_email_id
+                                                  {", closed_reason" if reasons else ""})
+                       VALUES (:tid, :k, :title, :f, :st, :rk, :occ, :occ, :closed, :eid
+                               {", :reason" if reasons else ""}) RETURNING id INTO :out""", binds)
         v = out.getvalue()
         item_id = int(v[0] if isinstance(v, list) else v)
-        fields = ext["fields"]
     else:
         item_id = hit["id"]
-        fields = {**(hit.get("fields") or {}), **ext["fields"]} if step.outcome != "stale" else hit.get("fields")
         heard = "last_heard_at = CASE WHEN last_heard_at IS NULL OR last_heard_at < :occ THEN :occ " \
                 "ELSE last_heard_at END"
         if step.outcome == "change":
+            if closed or step.reopen:
+                closed_val = closed
+            else:
+                closed_val, reason = hit.get("closed_at"), hit.get("closed_reason")
+            binds = {"st": step.state, "rk": step.rank, "title": (ext["title"] or None) and ext["title"][:400],
+                     "f": json.dumps(fields or {}), "occ": occ, "closed": closed_val, "eid": email_id,
+                     "id": item_id}
+            if reasons:
+                binds["reason"] = reason
             cur.execute(f"""UPDATE tracker_items SET state = :st, state_rank = :rk, title = NVL(:title, title),
                                    fields = :f, last_changed_at = :occ, {heard},
-                                   closed_at = :closed, last_email_id = :eid WHERE id = :id""",
-                        {"st": step.state, "rk": step.rank, "title": (ext["title"] or None) and ext["title"][:400],
-                         "f": json.dumps(fields or {}), "occ": occ,
-                         "closed": closed if (closed or step.reopen) else hit.get("closed_at"), "eid": email_id,
-                         "id": item_id})
+                                   closed_at = :closed{rsql}, last_email_id = :eid WHERE id = :id""", binds)
         else:
-            cur.execute(f"UPDATE tracker_items SET fields = :f, {heard}, last_email_id = NVL(:eid, last_email_id) "
-                        f"WHERE id = :id", {"f": json.dumps(fields or {}), "occ": occ, "eid": email_id, "id": item_id})
+            reopen = ", closed_at = NULL, closed_reason = NULL" if revive else ""
+            cur.execute(f"UPDATE tracker_items SET fields = :f, {heard}, last_email_id = NVL(:eid, last_email_id)"
+                        f"{reopen} WHERE id = :id",
+                        {"f": json.dumps(fields or {}), "occ": occ, "eid": email_id, "id": item_id})
     ev_fields = {**ext["fields"], **({"note": step.note} if step.note else {})}
     cur.execute("""INSERT INTO tracker_events (tracker_id, tracker_item_id, email_item_id, outcome, old_state,
                                                new_state, fields, notify, occurred_at, notified_at)
@@ -930,7 +1007,8 @@ def apply_extraction(conn, tracker: dict, email_id: int | None, ext: dict, now: 
     cur.execute("UPDATE trackers SET last_event_at = SYSTIMESTAMP WHERE id = :tid", {"tid": tid})
     _HOME.clear()
     return {"item_id": item_id, "outcome": step.outcome, "state": step.state, "old_state": hit["state"] if hit
-            else None, "notify": notify, "title": ext["title"], "key": ext["item_key"], "note": step.note}
+            else None, "notify": notify, "title": ext["title"], "key": ext["item_key"], "note": step.note,
+            "closed_reason": reason if closed else None, "reopened": bool(revive or (step.reopen and not closed))}
 
 
 def record_irrelevant(conn, tracker_id: int, email_id: int, why: str = "irrelevant") -> None:
@@ -1076,22 +1154,94 @@ def run_user(ctx, router=None, cap: int = CYCLE_CAP, days: int = WINDOW_DAYS) ->
 
 
 def close_due(conn, now: datetime | None = None) -> int:
-    """Finished items leave the board (delivered + N days, refunded, sold out...). History stays."""
+    """Finished items leave the board (delivered + N days, refunded, sold out...); orders that went quiet leave as
+    'assumed delivered' (after migration 016; silently - no event, no notification). History stays."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    reasons = has_closed_reason(conn)
     cur = conn.cursor()
-    cur.execute("""SELECT ti.id, ti.state, ti.last_changed_at, t.compiled
+    cur.execute("""SELECT ti.id, ti.state, ti.last_changed_at, t.compiled, ti.fields, ti.last_heard_at
                      FROM tracker_items ti JOIN trackers t ON t.id = ti.tracker_id
                     WHERE ti.closed_at IS NULL AND t.status IN ('active', 'paused')""")
     n = 0
-    for iid, state, lc, comp in cur.fetchall():
+    for row in cur.fetchall():
+        iid, state, lc, comp = row[:4]
+        fields = (_json(row[4]) if len(row) > 4 else None) or {}
+        heard = _naive(row[5]) if len(row) > 5 else None
         c = compiled_of({"id": None, "compiled": comp})
-        if c and should_close(spec_for(c), state, lc, now):
+        if not c:
+            continue
+        sp = spec_for(c)
+        if should_close(sp, state, lc, now):
             conn.cursor().execute("UPDATE tracker_items SET closed_at = SYSTIMESTAMP WHERE id = :id AND "
                                   "closed_at IS NULL", {"id": int(iid)})
+            n += 1
+        elif reasons and assumed_delivered(sp, state, max((x for x in (_naive(lc), heard) if x), default=None),
+                                           fields, now):
+            conn.cursor().execute("UPDATE tracker_items SET closed_at = SYSTIMESTAMP, closed_reason = :r "
+                                  "WHERE id = :id AND closed_at IS NULL", {"id": int(iid), "r": "assumed_delivered"})
             n += 1
     if n:
         _HOME.clear()
     return n
+
+
+def clear_old(conn, tracker_id: int, days: int = CLEAR_OLD_DAYS, actor: str = "user") -> int:
+    """Close the open orders of an orders tracker that nobody has heard about for `days` days, as assumed
+    delivered (a later email reopens them). Needs migration 016. Returns how many were closed."""
+    t = get(conn, tracker_id)
+    if t is None or t["status"] == "deleted" or t["kind"] != "orders":
+        return 0
+    if not has_closed_reason(conn):
+        raise store.MigrationNeeded("Clearing old orders needs a database update: run 'emaild migrate'.")
+    binds = {"tid": int(tracker_id), "days": int(max(1, days)), "r": "assumed_delivered"}
+    binds.update({f"s{n}": st for n, st in enumerate(ASSUMABLE_STATES)})
+    cur = conn.cursor()
+    cur.execute(f"""UPDATE tracker_items SET closed_at = SYSTIMESTAMP, closed_reason = :r
+                     WHERE tracker_id = :tid AND closed_at IS NULL
+                       AND state IN ({", ".join(f":s{n}" for n in range(len(ASSUMABLE_STATES)))})
+                       AND NVL(last_heard_at, NVL(last_changed_at, first_seen_at))
+                           < SYSTIMESTAMP - NUMTODSINTERVAL(:days, 'DAY')""", binds)
+    n = cur.rowcount or 0
+    store.audit(conn, actor, "tracker_clear_old", str(tracker_id), {"days": int(days), "closed": n})
+    _HOME.clear()
+    return n
+
+
+def mark_item(conn, tracker_item_id: int, state: str = "delivered", actor: str = "user") -> dict:
+    """The user says an order arrived (or another finished state of its kind): set it and take it off the board.
+    VPD makes another user's item id simply not found. {"ok", "title", "state"} or {"error"}."""
+    reasons = has_closed_reason(conn)
+    cur = conn.cursor()
+    cur.execute("""SELECT ti.id, NVL(ti.title, ti.item_key), ti.state, ti.closed_at, t.id, t.compiled
+                     FROM tracker_items ti JOIN trackers t ON t.id = ti.tracker_id
+                    WHERE ti.id = :id AND t.status <> 'deleted'""", {"id": int(tracker_item_id)})
+    r = cur.fetchone()
+    if not r:
+        return {"error": "Not found (or not yours)."}
+    c = compiled_of({"id": r[4], "compiled": r[5]})
+    sp = spec_for(c) if c else None
+    st = _slug(state)
+    if sp is None or st not in (sp["terminal"] or ()):
+        return {"error": f"“{label(st)}” isn't a finished state for this tracker."}
+    if r[3] is not None:
+        return {"error": "Already off the board."}
+    rsql = ", closed_reason = :reason" if reasons else ""
+    binds = {"st": st, "rk": sp["rank"].get(st, 0), "id": int(tracker_item_id)}
+    if reasons:
+        binds["reason"] = "marked"
+    cur.execute(f"""UPDATE tracker_items SET state = :st, state_rank = GREATEST(state_rank, :rk),
+                           last_changed_at = SYSTIMESTAMP, closed_at = SYSTIMESTAMP{rsql}
+                     WHERE id = :id AND closed_at IS NULL""", binds)
+    if not cur.rowcount:
+        return {"error": "Already off the board."}
+    cur.execute("""INSERT INTO tracker_events (tracker_id, tracker_item_id, outcome, old_state, new_state, fields,
+                                               notify, occurred_at, notified_at)
+                   VALUES (:tid, :iid, 'change', :old, :new, :f, FALSE, SYSTIMESTAMP, SYSTIMESTAMP)""",
+                {"tid": int(r[4]), "iid": int(tracker_item_id), "old": r[2], "new": st,
+                 "f": json.dumps({"by": actor})})
+    store.audit(conn, actor, "tracker_item_marked", str(tracker_item_id), {"state": st})
+    _HOME.clear()
+    return {"ok": True, "title": r[1] or "", "state": st, "tracker_id": int(r[4])}
 
 
 # ---------- dry runs ----------
@@ -1248,8 +1398,11 @@ def decorate(t: dict, it: dict, now: datetime, today: date) -> dict:
     when = ""
     if nd:
         when = f"{nd[0]} {_day(nd[1], today)}" + (f" {nd[1]:%H:%M}" if nd[1].hour or nd[1].minute else "")
-    return {**it, "tone": tone(it["state"]), "label": label(it["state"]),
-            "stalled": stalled(spec_for(c), it["state"], it.get("last_changed_at"), now) if c else None,
+    reason = it.get("closed_reason") if it.get("closed_at") else None
+    return {**it, "tone": "info" if reason == "assumed_delivered" else tone(it["state"]),
+            "label": CLOSED_LABELS.get(reason) or label(it["state"]),
+            "stalled": None if it.get("closed_at") else
+            (stalled(spec_for(c), it["state"], it.get("last_changed_at"), now) if c else None),
             "when": when,
             "changed": _ts(it.get("last_changed_at")) or "", "heard": _ts(it.get("last_heard_at")) or ""}
 
@@ -1266,9 +1419,11 @@ def items(conn, tracker_id: int | None = None, state: str | None = None, include
         binds["st"] = _slug(state)
     if not include_closed:
         where.append("ti.closed_at IS NULL")
+    reason_col = "ti.closed_reason" if has_closed_reason(conn) else "NULL"
     cur = conn.cursor()
     cur.execute(f"""SELECT ti.id, ti.tracker_id, t.name, t.kind, ti.item_key, ti.title, ti.fields, ti.state,
-                           ti.first_seen_at, ti.last_changed_at, ti.last_heard_at, ti.closed_at, ti.last_email_id
+                           ti.first_seen_at, ti.last_changed_at, ti.last_heard_at, ti.closed_at, ti.last_email_id,
+                           {reason_col}
                       FROM tracker_items ti JOIN trackers t ON t.id = ti.tracker_id
                      WHERE {" AND ".join(where)}
                      ORDER BY ti.closed_at DESC NULLS FIRST, ti.last_changed_at DESC NULLS LAST
@@ -1276,7 +1431,8 @@ def items(conn, tracker_id: int | None = None, state: str | None = None, include
     return [{"id": int(r[0]), "tracker_id": int(r[1]), "tracker": r[2], "kind": r[3], "item_key": r[4],
              "title": r[5] or r[4], "fields": _json(r[6]) or {}, "state": r[7], "first_seen_at": _ts(r[8]),
              "last_changed_at": r[9], "last_heard_at": r[10], "closed_at": _ts(r[11]),
-             "email_id": int(r[12]) if r[12] is not None else None} for r in cur.fetchall()]
+             "email_id": int(r[12]) if r[12] is not None else None,
+             "closed_reason": r[13] if len(r) > 13 else None} for r in cur.fetchall()]
 
 
 def boards(conn, closed_limit: int = 20) -> list[dict]:
@@ -1570,10 +1726,44 @@ _STATUS_INTENTS = [
 ]
 
 
+# Delivery / order questions. Every pattern needs a parcel word (delivery, order, parcel, package, shipment) in a
+# question shape, so "when is the school concert" or "when will the order of service be printed" don't match.
+_PARCEL = r"(?:deliver(?:y|ies)|orders?|parcels?|packages?|shipments?)"
+_WHO = r"(?:(?P<who>[\w&'.\- ]{2,60}?) )?"
+_FROM = r"(?: from (?P<who2>[\w&'.\- ]{2,60}?))?"
+_DELIVERY_INTENTS = [
+    re.compile(rf"^when (?:is|are|will|does|do|should|'?s) (?:my|the|our) {_WHO}{_PARCEL}{_FROM}"
+               rf"(?: (?:be )?(?:due|arrive|arriving|coming|come|get here|turn up|be delivered|delivered|land|ship|"
+               rf"shipping|expected))?$", re.I),
+    re.compile(rf"^(?:has|have|did) (?:my|the|our) {_WHO}{_PARCEL}{_FROM} (?:shipped|arrived|left|come|turned up|"
+               rf"been (?:shipped|delivered|sent|dispatched|despatched)|(?:been )?dispatched|(?:been )?despatched)$",
+               re.I),
+    re.compile(rf"^where(?:'s| is| are) (?:my|the|our) {_WHO}{_PARCEL}{_FROM}$", re.I),
+    re.compile(rf"^(?:any|are there any|what|which) (?:{_PARCEL})(?: (?:coming|due|arriving|expected|"
+               rf"being delivered))? (?P<when>today|tomorrow|this week)$", re.I),
+    re.compile(rf"^(?:what|which) {_WHO}{_PARCEL}{_FROM} (?:are|is) (?:still )?(?:pending|outstanding|open|"
+               rf"on (?:the|their|its) way|coming|in transit|due|expected)$", re.I),
+    re.compile(r"^when did (?:my|the|our) (?P<who>[\w&'.\- ]{2,60}?) (?:arrive|get delivered|turn up|come|ship|"
+               r"get here)$", re.I),
+]
+_CLEAR_INTENT = re.compile(r"^(?:please )?(?:close|clear|tidy up|clean up|clear out|remove)(?: out)? (?:the |my |all "
+                           r"(?:the |my )?)?(?:old|stale) (?:(?P<ref>[\w&'.\- ]{2,60}?) )?(?:orders?|deliveries|"
+                           r"parcels)$", re.I)
+_WHO_JUNK = re.compile(r"^(?:the|my|our|a|an)\s+|(?:'s|s')$", re.I)
+
+
+def _who(m: re.Match) -> str | None:
+    w = next((m.groupdict().get(k) for k in ("who", "who2") if m.groupdict().get(k)), None)
+    w = _WHO_JUNK.sub("", (w or "").strip()).strip()
+    return w if len(w) >= 2 and w.lower() not in ("new", "latest", "last", "recent", "online") else None
+
+
 def parse_intent(text: str) -> dict | None:
     """Conservative: {"op": "add", "text"} for "track my ... orders/status/tickets" (or "tracker: ..."),
     {"op": "list"}, {"op": "status", "kind"} for "what's still in transit?" / "is everything up?" /
-    "what's going on sale?"; None otherwise (then it's a question for query.run)."""
+    "what's going on sale?", {"op": "delivery", "who", "when", "past"} for delivery and order questions ("when is
+    my Acme Shop delivery due", "has my order shipped", "any deliveries today"), {"op": "clear_old", "ref"} for
+    "close the old Acme Shop orders"; None otherwise (then it's a question for query.run)."""
     t = re.sub(r"\s+", " ", text or "").strip().rstrip("?.!")
     if not t:
         return None
@@ -1585,7 +1775,91 @@ def parse_intent(text: str) -> dict | None:
     for kind, rx in _STATUS_INTENTS:
         if rx.search(t):
             return {"op": "status", "kind": kind}
+    m = _CLEAR_INTENT.match(t)
+    if m:
+        ref = _WHO_JUNK.sub("", (m.group("ref") or "").strip()).strip()
+        return {"op": "clear_old", "ref": ref or None}
+    for n, rx in enumerate(_DELIVERY_INTENTS):
+        m = rx.match(t)
+        if m:
+            when = (m.groupdict().get("when") or "").lower() or None
+            return {"op": "delivery", "kind": "orders", "who": _who(m), "when": when,
+                    "past": n == len(_DELIVERY_INTENTS) - 1}
     return None
+
+
+def _haystack(t: dict, it: dict) -> str:
+    """Everything a retailer/item phrase may match: tracker name, its sender labels, retailer, item, title, key."""
+    c = compiled_of(t) or {}
+    m = c.get("match") or {}
+    parts = [t.get("name"), *(m.get("senders") or []), *(m.get("sender_addrs") or []), *(m.get("domains") or []),
+             (it.get("fields") or {}).get("retailer"), (it.get("fields") or {}).get("item"), it.get("title"),
+             it.get("item_key")]
+    return " ".join(norm(str(p)) for p in parts if p)
+
+
+_WHO_STOP = {"the", "my", "our", "from", "and", "new", "online", "shop", "store", "order", "orders", "parcel",
+             "parcels", "package", "packages", "delivery", "deliveries", "shipment"}
+
+
+def matches_who(who: str, t: dict, it: dict) -> bool:
+    """Every significant word of the phrase appears in the tracker / item text ('Acme Shop' -> 'acme')."""
+    words = [norm(w) for w in re.split(r"[\s,]+", who or "") if norm(w) and norm(w) not in _WHO_STOP]
+    words = [w for w in words if len(w) >= 3] or [norm(who)]
+    hay = _haystack(t, it)
+    return bool(words) and all(w in hay for w in words)
+
+
+def _expected_key(r: dict) -> tuple:
+    """Soonest expected delivery first; orders without a date after them."""
+    d = parse_when((r.get("fields") or {}).get("expected_date"))
+    return (d is None, d or datetime.max)
+
+
+def delivery_answer(conn, who: str | None = None, when: str | None = None) -> dict | None:
+    """Answer a delivery/order question from the OPEN items of the active orders trackers: optional retailer/item
+    filter, soonest expected first, each with state, expected date, last update and a stalled flag.
+    {"title", "items": [{"line", "email_id", "tracker_item_id"}]}, or None when the question should go to the
+    normal email search instead (no orders tracker, or a named retailer/item with nothing open)."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    today = _local_today()
+    ts = {t["id"]: t for t in active_trackers(conn) if t["kind"] == "orders"}
+    if not ts:
+        return None
+    rows = [decorate(ts[it["tracker_id"]], it, now, today) for it in items(conn, limit=500)
+            if it["tracker_id"] in ts]
+    if who:
+        rows = [r for r in rows if matches_who(who, ts[r["tracker_id"]], r)]
+        if not rows:
+            return None
+    if when in ("today", "tomorrow", "this week"):
+        horizon = {"today": 0, "tomorrow": 1, "this week": 6}[when]
+
+        def due(r: dict) -> bool:
+            d = parse_when((r.get("fields") or {}).get("expected_date"))
+            return (r["state"] == "out_for_delivery" and when == "today") or \
+                (d is not None and today <= d.date() <= today + timedelta(days=horizon) and
+                 (when != "tomorrow" or d.date() == today + timedelta(days=1)))
+        rows = [r for r in rows if due(r)]
+    rows.sort(key=_expected_key)
+    where = f" from {who}" if who else ""
+    if not rows:
+        title = f"No deliveries expected {when}{where}." if when else f"Nothing on its way{where}."
+        return {"title": title, "items": []}
+    n = len(rows)
+    title = (f"{n} deliver{'ies' if n != 1 else 'y'} expected {when}{where}" if when else
+             f"{n} open order{'s' if n != 1 else ''}{where}, soonest first")
+    out = []
+    for r in rows[:15]:
+        line = f"{r['title']}: {r['label']}"
+        if r.get("when"):
+            line += f" · {r['when']}"
+        if r.get("changed"):
+            line += f" · last update {r['changed'][:10]}"
+        if r.get("stalled"):
+            line += f" ⚠ {r['stalled']}"
+        out.append({"line": line, "email_id": r.get("email_id"), "tracker_item_id": r["id"]})
+    return {"title": title, "items": out}
 
 
 def status_answer(conn, kind: str) -> dict:
@@ -1611,7 +1885,7 @@ def status_answer(conn, kind: str) -> dict:
     else:
         rows = [r for r in rows if r["state"] not in ("sold_out", "cancelled")]
         title = f"{len(rows)} event{'s' if len(rows) != 1 else ''} on the board" if rows else "Nothing on sale."
-    lines = []
+    lines, ids = [], []
     for r in rows[:15]:
         s = f"{r['title']}: {r['label']}"
         if r.get("when"):
@@ -1621,7 +1895,8 @@ def status_answer(conn, kind: str) -> dict:
         elif r.get("changed"):
             s += f" · since {r['changed'][:10]}"
         lines.append(s)
-    return {"title": title, "lines": lines}
+        ids.append(r.get("email_id"))
+    return {"title": title, "lines": lines, "item_ids": ids}
 
 
 # ---------- suggestions ----------

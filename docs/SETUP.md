@@ -108,11 +108,31 @@ Outlook.com, Hotmail and Live mailboxes (personal Microsoft accounts) are read t
    emaild migrate
    podman compose up -d --force-recreate api worker
    ```
-7. Open the Status page → **Link an Outlook account** → sign in with the Outlook.com mailbox and accept the read-only permissions. The Accounts table shows it with provider *Outlook.com*.
+7. Open the Status page → **Link personal Outlook** → sign in with the Outlook.com mailbox and accept the read-only permissions. The Accounts table shows it with provider *Microsoft* and a *personal* tag.
 
 What syncs: Inbox, Sent Items, Junk Email and Archive (if you have one), for the same `EMAILD_BACKFILL_DAYS` window as Gmail, and then changes every cycle. Outlook's state is mapped onto the labels emAIl already uses: Junk → spam, Deleted Items → trash, Sent → sent, flagged → starred, unread, high importance → important. Focused Inbox's *Other* becomes `CATEGORY_OTHER`, which is a hint only and isn't treated as promotions. Moving a message to Junk in Outlook reclassifies it as spam in emAIl, just like Gmail's Spam label.
 
-If Microsoft stops accepting the sign-in (password change, revoked consent, or 90 days without a sync), the account shows **reauth** with "Microsoft sign-in expired — relink the account". Click **Link an Outlook account** again. Sync picks up where it stopped.
+If Microsoft stops accepting the sign-in (password change, revoked consent, or 90 days without a sync), the account shows **reauth** with "Microsoft sign-in expired — relink the account". Click **Link personal Outlook** (or **Link work or school account**) again. Sync picks up where it stopped.
+
+### Work or school accounts (Microsoft 365)
+
+A work or school mailbox (Microsoft 365, signed in through your organisation's Entra ID) can be linked alongside personal ones. It syncs exactly the same way (same folders, delta sync and labels); only the sign-in differs.
+
+> **Check your employer's policy first.** Many organisations don't allow work mail to be copied into, or processed by, tools they haven't approved, even read-only and self-hosted. If in doubt, ask before linking.
+
+1. In the same app registration (**Authentication**, or **Manifest → signInAudience**), set *Supported account types* to **Accounts in any organizational directory and personal Microsoft accounts** (multitenant + personal, `AzureADandPersonalMicrosoftAccount`). *Personal Microsoft accounts only* rejects work accounts with `AADSTS50020` / `AADSTS700016`. The permissions stay the same: delegated `Mail.Read`, `User.Read`, `offline_access`.
+2. `.env`: `EMAILD_MS_WORK_TENANT` chooses the authority work accounts sign in through. The default `organizations` accepts any organisation's account. To lock linking to one directory, set it to that tenant's ID or a verified domain, e.g. `EMAILD_MS_WORK_TENANT=<your-tenant-id>` or `EMAILD_MS_WORK_TENANT=contoso.example.com`. Personal accounts keep using `EMAILD_MS_TENANT=consumers`.
+3. Apply migration 016 (`emaild migrate`): it stores each account's own authority, so token refreshes for a work account go to the authority it was linked with.
+4. Status page → **Link work or school account (Microsoft 365)** (shown when `EMAILD_MS_CLIENT_ID` is set) → sign in with the work account.
+
+What you may see:
+- **"Need admin approval" / `AADSTS65001` / `AADSTS90094`.** Many organisations block users from consenting to apps themselves. Your IT team has to approve emAIl's app registration for `Mail.Read`, `User.Read` and `offline_access` (read-only), e.g. via *Enterprise applications → Grant admin consent*, or through their app approval workflow. Then link again.
+- **Conditional Access (`AADSTS53003` and other `AADSTS53xxx`).** Your organisation only allows sign-ins from approved devices, apps or locations. Only IT can change this. Some policies also force frequent re-sign-in, so a work account may show **reauth** more often than a personal one; relink when it does.
+- **Wrong account type (`AADSTS50020`, `AADSTS700016`, `AADSTS50194`).** The app registration's supported account types don't include this account (step 1), or you used the personal button for a work account (or the other way round).
+
+The callback page names the `AADSTS` code and what to do; nothing secret is shown.
+
+A newly linked work account gets the privacy policy `local_only`: its mail is only ever processed by your local models, never by an optional cloud provider. (While any account is `local_only`, questions use local models for all mail.) The Accounts table and `emaild status` show each Microsoft account as *work* or *personal*.
 
 ## 6. Connect an MCP client
 
@@ -330,6 +350,9 @@ emaild tracker off 12 · emaild tracker on 12 · emaild tracker rm 12
 emaild tracker test 12                               # or: emaild tracker test "Track my Acme Shop orders"
 emaild tracker suggest                               # recurring order/status mail nothing tracks yet
 emaild ask "what's still in transit?"                # answered from the boards
+emaild ask "when is my Acme Shop delivery due?"      # open orders only, soonest expected first, numbered
+emaild tracker clear-old 12 [--days 21]              # close open orders with no news for 21+ days
+emaild show 2                                        # open [2] of that list (see "Opening emails" below)
 ```
 
 The same works on the web (Trackers page: add box, boards with Pause / Resume / Delete / Test, finished items folded away; a line on the Status panel such as "📦 3 in transit · 🟢 all services up · 🎟 1 on sale Fri"), in Telegram (`/track …` with ✅ Save / ✖ Cancel, `/trackers`, `/tracker off 12`, or just *"track my Acme Shop orders"*, *"is everything up?"*) and over MCP (`create_tracker` → `confirm_tracker`, `trackers`, `tracker_items`).
@@ -339,8 +362,26 @@ How trackers run:
 - States only move forward (a late "shipped" email can't undo "delivered"); delays, problems, cancellations, returns and refunds apply at any time. Repeats ("still up") only refresh "last heard".
 - Notifications go to Telegram outside quiet hours and not while muted: orders on ordered / shipped / delayed / problem / cancelled; services on every change, with a "recovered" note; on-sale on presale / general sale / cancelled, plus a reminder on the morning of each sale date. Say "tell me when they're delivered too" or "don't tell me about maintenance" to change that.
 - Finished items leave the board (delivered orders after 7 days; refunded at once; sold-out events after 7 days) but stay in history (`tracker show`, MCP `tracker_items(include_closed=true)`). Orders shipped 9+ days ago without a delivery update are flagged *stalled*.
+- Retailers often never send a "delivered" email, so orders that go quiet age out (after migration 016): an open order with no update 21 days past its expected date, or 30 days without any update when there's no expected date, closes as **assumed delivered (no confirmation email)**, shown apart from confirmed deliveries. On a tracker's first fill, an order whose latest email is already 30+ days old starts closed the same way. Aged-out closes never notify, and a later email about the same order reopens it. Tidy up by hand with **Mark delivered** (web board, Telegram ✅ Delivered, MCP `close_tracker_item`), **Clear old** / `emaild tracker clear-old 12` / `/tracker 12 clear old`, or *"close the old Acme Shop orders"*.
+- Delivery questions — *"when is my Acme Shop delivery due?"*, *"has my order shipped?"*, *"where's my package?"*, *"any deliveries today?"*, *"what orders are pending?"* — are answered from the open orders (optionally just one retailer's), soonest expected first, with state, expected date, last update and a stalled flag. Without an orders tracker, or for a past item that's no longer open (*"when did the bike pump arrive?"*), they go to the normal email search.
 - Status-only emails a tracker has captured (shipping updates, service status) may have emAIl's *open* proposal changed from keep to archive ("Captured by tracker …"). Never order confirmations, on-sale emails, alerts, reviewed decisions, decisions made by your own rules, or personal mail.
 - The morning brief gets a 📋 Trackers section: one line per tracker with changes since the last brief, and sales opening today or tomorrow.
+
+## 13b. Opening emails from lists (`/show N`)
+
+Every reply that lists emails numbers them **[1], [2], …**: `ask` lists and answer sources, the brief (one running numbering across the whole message), Needs attention, follow-ups, delivery answers and tracker boards (each item's latest email), and project/thread status citations. Open one by its number:
+
+```bash
+emaild needs                    # [1] … [2] …
+emaild show 2                   # summary card: subject, sender, local date, what it says, key details
+emaild show 2 --full            # the whole email as plain text (quoted replies stripped)
+emaild show 2 --thread          # where its conversation stands
+emaild show --item 501          # by email id
+```
+
+The card's key details are pulled from the email without a model: dates and times it mentions, amounts with a currency, how many links it has and their first three domains (never the links themselves), and attachment names. If the stored summary is weak, emAIl writes a better one once (one local-model call) and keeps it.
+
+The whole email is never shown for spam, suspicious, one-time-code or security-held mail, or for expired codes emAIl has scrubbed, and every full view is logged (`show_full` in the audit log). In Telegram it's also refused at `/detail minimal`. Migration 016 stores the lists (the last ~50 per channel); before it, numbering still shows but `show` asks you to run `emaild migrate`. Telegram usage is in [TELEGRAM.md](TELEGRAM.md#opening-emails); MCP clients use `show_email(item_id, full=false)`; the web item page has the summary card on top with the full email folded underneath.
 
 ## 14. Projects (Phase 3, slice 1)
 

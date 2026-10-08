@@ -1,9 +1,9 @@
-{% macro rows(items) %}
+{% macro rows(items, nums=None) %}
 <div class="list">
 {% for r in items %}<div class="li needs-row" id="n{{ r.decision_id }}">
   <button class="seen" title="Seen it - clear from this list" hx-post="/needs/{{ r.decision_id }}/seen"
           hx-target="#n{{ r.decision_id }}" hx-swap="outerHTML">✓</button>
-  <a href="/item/{{ r.item_id }}" style="color:inherit;text-decoration:none" target="_blank"><b>{{ r.sender }}</b> — {{ r.subject }}</a>
+  <a href="/item/{{ r.item_id }}" style="color:inherit;text-decoration:none" target="_blank">{% if nums and nums.get(r.item_id) %}<span class="muted">[{{ nums.get(r.item_id) }}]</span> {% endif %}<b>{{ r.sender }}</b> — {{ r.subject }}</a>
   {% if r.summary and r.summary != r.subject %}<div class="s">{{ r.summary }}</div>{% endif %}</div>
 {% endfor %}
 </div>

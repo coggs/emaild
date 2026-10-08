@@ -113,13 +113,14 @@ def build(conn: oracledb.Connection, since: datetime, until: datetime | None = N
     important = _item_rows(conn, f"""{window} AND {FINAL_ACTION} = 'keep'
                                      AND {FINAL_IMPORTANCE} IN ('high','normal')""", b,
                            f"CASE {FINAL_IMPORTANCE} WHEN 'high' THEN 0 ELSE 1 END, i.received_at DESC", 8)
-    cur.execute(f"""SELECT i.sender_name, i.sender_addr, COUNT(*) n FROM items i
+    cur.execute(f"""SELECT i.sender_name, i.sender_addr, COUNT(*) n, MAX(i.id) FROM items i
                      WHERE {window} AND i.is_from_me = FALSE AND {EXCLUDE_UNSAFE}
                        AND NVL(JSON_SERIALIZE(i.meta), '{{}}') NOT LIKE '%list_unsubscribe%'
                        AND NOT EXISTS (SELECT 1 FROM items j WHERE LOWER(j.sender_addr) = LOWER(i.sender_addr)
                                         AND j.received_at < :since)
                      GROUP BY i.sender_name, i.sender_addr ORDER BY n DESC FETCH FIRST 6 ROWS ONLY""", b)
-    new_senders = [{"sender": r[0] or r[1], "addr": r[1], "count": r[2]} for r in cur]
+    new_senders = [{"sender": r[0] or r[1], "addr": r[1], "count": r[2], "item_id": r[3] if len(r) > 3 else None}
+                   for r in cur]                       # item_id: their newest email, so "/show N" can open it
     cur.execute(f"""SELECT COUNT(CASE WHEN cat IN ('spam','suspicious') OR is_spam = 1 THEN 1 END),
                            COUNT(CASE WHEN cat = 'one_time' THEN 1 END)
                       FROM (SELECT NVL(JSON_VALUE(d.corrected, '$.category'), d.category) cat,
@@ -214,22 +215,53 @@ def generate(conn: oracledb.Connection, ctx: UserCtx, kind: str = "on_demand", h
 
 # ---------- rendering ----------
 
-def _line(r: dict, detail: str) -> str:
+class _Numbers:
+    """One running numbering across a whole brief: [1], [2], ... in the order emails appear, item ids collected
+    for lists.remember(). Rows without an email get a bullet instead."""
+
+    def __init__(self, out: list | None):
+        self.ids = out if out is not None else []
+
+    def tag(self, item_id) -> str:
+        if item_id is None:
+            return "•"
+        self.ids.append(int(item_id))
+        return f"[{len(self.ids)}]"
+
+
+def _line(r: dict, detail: str, nums: _Numbers | None = None) -> str:
+    tag = (nums or _Numbers(None)).tag(r.get("item_id"))
     if detail == "minimal":
-        return f"• {html.escape(r['sender'])}"
-    s = f"• <b>{html.escape(r['sender'])}</b> — {html.escape(r['subject'] or '(no subject)')}"
+        return f"{tag} {html.escape(r['sender'])}"
+    s = f"{tag} <b>{html.escape(r['sender'])}</b> — {html.escape(r['subject'] or '(no subject)')}"
     if r.get("summary") and r["summary"] != r["subject"]:
         s += f"\n   <i>{html.escape(r['summary'][:160])}</i>"
     return s
 
 
-def _waiting_line(r: dict, detail: str) -> str:
-    who = f"• {html.escape(r['to'])} · {int(r.get('days_waiting') or 0)} days"
+def _waiting_line(r: dict, detail: str, nums: _Numbers | None = None) -> str:
+    tag = (nums or _Numbers(None)).tag(r.get("item_id"))
+    who = f"{tag} {html.escape(r['to'])} · {int(r.get('days_waiting') or 0)} days"
     return who if detail == "minimal" else f"{who} — {html.escape(r['subject'] or '(no subject)')}"
 
 
-def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str:
-    """Telegram HTML. minimal: counts and sender names only; summary: + subjects and one-line summaries."""
+def number_map(b: dict, cap: int | None = None) -> dict[int, int]:
+    """item id -> its [n] in the brief, in the Telegram order (alerts, waiting on your reply, worth knowing, waiting
+    on others, new senders). The web page shows the same numbers."""
+    ids: list[int] = []
+    for key in ("alerts", "awaiting_reply", "important", "waiting_on_others", "new_senders"):
+        rows = b.get(key) or []
+        for r in rows[:cap] if cap else rows:
+            if r.get("item_id") is not None and int(r["item_id"]) not in ids:
+                ids.append(int(r["item_id"]))
+    return {iid: n for n, iid in enumerate(ids, 1)}
+
+
+def render_telegram(b: dict, detail: str = "summary", base_url: str = "", ids_out: list | None = None) -> str:
+    """Telegram HTML. minimal: counts and sender names only; summary: + subjects and one-line summaries.
+    Every email is numbered with ONE running numbering across the message; pass `ids_out` (a list) to get the item
+    ids in that order, for lists.remember()."""
+    nums = _Numbers(ids_out)
     since = b["period"].get("since_local") or b["period"]["since"] + " UTC"
     out = [f"☀️ <b>Morning brief</b> — {b['received']} new since {html.escape(since)}"]
     if b.get("overview") and detail != "minimal":
@@ -240,13 +272,13 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
         rows = b.get(key) or []
         if rows:
             out.append(f"\n<b>{title}</b> ({len(rows)})")
-            out.extend(_line(r, detail) for r in rows[:6])
+            out.extend(_line(r, detail, nums) for r in rows[:6])
             if len(rows) > 6:
                 out.append(f"   …and {len(rows) - 6} more")
     waiting_on = b.get("waiting_on_others") or []
     if waiting_on:
         out.append(f"\n<b>⏳ Waiting on others</b> ({len(waiting_on)})")
-        out.extend(_waiting_line(r, detail) for r in waiting_on[:6])
+        out.extend(_waiting_line(r, detail, nums) for r in waiting_on[:6])
     if b.get("trackers"):
         out.append("\n<b>📋 Trackers</b>")
         out.extend(html.escape(line) for line in b["trackers"][:8])
@@ -262,7 +294,8 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
     if b.get("codes_expired"):
         tail.append(f"🔑 {b['codes_expired']} sign-in codes/links (expired)")
     if b.get("new_senders"):
-        tail.append("🆕 new: " + ", ".join(html.escape(n["sender"]) for n in b["new_senders"][:4]))
+        tail.append("🆕 new: " + ", ".join((f"{nums.tag(n['item_id'])} " if n.get("item_id") is not None else "")
+                                         + html.escape(n["sender"]) for n in b["new_senders"][:4]))
     if b.get("waiting_review"):
         tail.append(f"🧐 {b['waiting_review']} waiting for your review — /review")
     if b.get("unsub_suggestions"):
@@ -279,6 +312,8 @@ def render_telegram(b: dict, detail: str = "summary", base_url: str = "") -> str
         out.append("\n" + "\n".join(tail))
     if not any(b.get(k) for _, k in sections):
         out.append("\nNothing needs you. 👌")
+    if nums.ids:
+        out.append("\n<i>/show N opens one (or reply with its number) · /show N full for the whole email</i>")
     if base_url:
         out.append(f'\n<a href="{html.escape(base_url)}/brief">Open in emAIl</a>')
     return "\n".join(out)[:4000]

@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from google_auth_oauthlib.flow import Flow
 
 from .. import brief as brief_mod
-from .. import crypto, db, projects, recommend, store, telegram, threads, trackers, triage, users
+from .. import crypto, db, projects, recommend, show, store, telegram, threads, trackers, triage, users
 from ..channels import outlook
 from ..channels.gmail import SCOPES, GmailChannel
 from ..config import settings
@@ -30,7 +30,8 @@ app = FastAPI(title="emAIl", version="0.0.1")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 _pending: dict[str, tuple[float, Flow, str]] = {}  # state -> (created, flow, user email)
-_ms_pending: dict[str, tuple[float, str, str]] = {}  # state -> (created, PKCE verifier, user email)
+# state -> (created, PKCE verifier, user email, kind 'personal'|'work', authority tenant)
+_ms_pending: dict[str, tuple[float, str, str, str, str]] = {}
 PENDING_SECONDS = 900
 
 
@@ -91,7 +92,8 @@ def index(request: Request):
     ctx = users.resolve()
     with db.user_session(ctx) as conn:
         data = _page_data(conn, ctx)
-    return templates.TemplateResponse(request, "index.html", {"user": ctx.email, "page": "home", **data})
+    return templates.TemplateResponse(request, "index.html", {"user": ctx.email, "page": "home",
+                                                              "ms_work": bool(settings().ms_client_id), **data})
 
 
 @app.get("/fragments/status", response_class=HTMLResponse)
@@ -347,6 +349,27 @@ def _board(conn, tracker_id: int) -> HTMLResponse:
     return HTMLResponse(str(_trackers_macro("board")(b)))
 
 
+@app.post("/trackers/items/{item_id}/delivered", response_class=HTMLResponse)
+def trackers_item_delivered(item_id: int):
+    """Mark delivered (board button): the order leaves the board; the board is re-rendered."""
+    with db.user_session(users.resolve()) as conn:
+        res = trackers.mark_item(conn, item_id, "delivered", actor="web")
+        if res.get("error"):
+            return HTMLResponse(f'<div class="err">{html.escape(res["error"])}</div>')
+        return _board(conn, res["tracker_id"])
+
+
+@app.post("/trackers/{tracker_id}/clear-old", response_class=HTMLResponse)
+def trackers_clear_old(tracker_id: int):
+    """Close the orders nobody has heard about for CLEAR_OLD_DAYS days (assumed delivered; a later email reopens)."""
+    with db.user_session(users.resolve()) as conn:
+        try:
+            trackers.clear_old(conn, tracker_id, actor="web")
+        except store.MigrationNeeded as e:
+            return HTMLResponse(f'<div class="err" id="tr{int(tracker_id)}">{html.escape(str(e))}</div>')
+        return _board(conn, tracker_id)
+
+
 @app.get("/trackers", response_class=HTMLResponse)
 def trackers_page(request: Request):
     ctx = users.resolve()
@@ -580,7 +603,9 @@ def brief_page(request: Request):
     with db.user_session(ctx) as conn:
         b = brief_mod.last_brief(conn)
         waiting = triage.stats(conn)["waiting_review"]
-    return templates.TemplateResponse(request, "brief.html", {"b": b, "page": "brief", "waiting": waiting})
+    nums = brief_mod.number_map(b) if b else {}       # the same [n] order as the Telegram brief
+    return templates.TemplateResponse(request, "brief.html", {"b": b, "page": "brief", "waiting": waiting,
+                                                              "nums": nums})
 
 
 @app.post("/brief")
@@ -650,6 +675,7 @@ def item_page(request: Request, item_id: int):
         if item is None:
             raise HTTPException(404, "not found")
         decision = triage.decision_for_item(conn, item_id)
+        card = show.card(conn, item_id)            # no model call on page load: the stored summary or snippet
         try:                                   # [] before migration 015
             rows = projects.list_projects(conn)
             names = {r["id"]: r["name"] for r in rows}
@@ -660,7 +686,7 @@ def item_page(request: Request, item_id: int):
             plist = []
         filed = projects.links_for_item(conn, item_id)
     return templates.TemplateResponse(request, "item.html", {"item": item, "decision": decision, "page": "",
-                                                             "projects": plist, "filed": filed})
+                                                             "projects": plist, "filed": filed, "card": card})
 
 
 def _flow(state: str | None = None) -> Flow:
@@ -714,42 +740,74 @@ def _ms_redirect() -> str:
 
 
 @app.get("/oauth/microsoft/start")
-def microsoft_start(user: str | None = None):
-    """Authorisation code + PKCE; `state` is single-use and expires like the Google flow's."""
+def microsoft_start(user: str | None = None, kind: str = "personal"):
+    """Authorisation code + PKCE; `state` is single-use and expires like the Google flow's.
+    kind=personal: Outlook.com / Hotmail (EMAILD_MS_TENANT, 'consumers'); kind=work: a work or school Microsoft 365
+    account (EMAILD_MS_WORK_TENANT, 'organizations' or one directory). The kind and authority travel in the
+    server-side state entry and are stored on the account at the callback."""
+    if kind not in outlook.KINDS:
+        raise HTTPException(400, "kind must be personal or work")
     ctx = users.resolve(user)
-    ms = outlook.MsApp.from_settings()
+    ms = outlook.MsApp.for_kind(kind)
     if not ms.client_id:
         raise HTTPException(500, "EMAILD_MS_CLIENT_ID is not set. See docs/SETUP.md (Linking an Outlook.com account)")
     state = secrets.token_urlsafe(24)
     verifier, challenge = outlook.pkce_pair()
     _prune(_ms_pending)
-    _ms_pending[state] = (time.time(), verifier, ctx.email)
+    _ms_pending[state] = (time.time(), verifier, ctx.email, kind, ms.tenant)
     return RedirectResponse(outlook.authorize_url(ms, _ms_redirect(), state, challenge))
 
 
+def _ms_error_page(kind: str, error: str | None, description: str | None = None) -> HTMLResponse:
+    """A readable failure page: the AADSTS code, what it means and what to do. Everything escaped; Microsoft's
+    description is cut to its first sentence (it never carries secrets, and the client secret is blanked anyway)."""
+    info = outlook.explain_error(error, description)
+    what = "work or school account" if kind == "work" else "Outlook account"
+    code = f" <code>{html.escape(info['code'])}</code>" if info["code"] else ""
+    detail = f"<p class=\"muted\">Microsoft said: {html.escape(info['detail'])}</p>" if info["detail"] else ""
+    body = (f"<!doctype html><meta charset=\"utf-8\"><title>Linking failed · emAIl</title>"
+            f"<body style=\"font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px\">"
+            f"<h1>Couldn't link your {what}</h1><h2>{html.escape(info['title'])}{code}</h2>"
+            f"<p>{html.escape(info['help'])}</p>{detail}<p><a href=\"/\">Back to emAIl</a></p></body>")
+    return HTMLResponse(body, status_code=400)
+
+
 @app.get("/oauth/microsoft/callback")
-def microsoft_callback(state: str, code: str | None = None, error: str | None = None):
+def microsoft_callback(state: str, code: str | None = None, error: str | None = None,
+                       error_description: str | None = None):
     entry = _ms_pending.pop(state, None)  # consume the state even on error, so it can't be replayed
+    kind = entry[3] if entry and len(entry) > 3 else "personal"
     if error:
-        raise HTTPException(400, f"Microsoft returned an error: {error}")
+        return _ms_error_page(kind, error, error_description)
     if entry is None or time.time() - entry[0] > PENDING_SECONDS:
         raise HTTPException(400, "unknown or expired sign-in attempt; start again")
     if not code:
         raise HTTPException(400, "Microsoft did not return an authorisation code; start again")
-    _, verifier, email = entry
-    ms = outlook.MsApp.from_settings()
+    _, verifier, email = entry[:3]
+    tenant = entry[4] if len(entry) > 4 else None
+    ms = outlook.MsApp.for_kind(kind)
+    if tenant:
+        ms = outlook.MsApp(ms.client_id, ms.client_secret, tenant)    # exactly the authority the user signed in at
     try:
         creds = outlook.exchange_code(ms, code, verifier, _ms_redirect())
     except (outlook.ReauthRequired, outlook.TokenError) as e:
-        raise HTTPException(400, f"Microsoft sign-in failed: {e}") from e
+        return _ms_error_page(kind, getattr(e, "error", None) or "token_error",
+                              getattr(e, "description", None) or str(e))
     address, _ = outlook.OutlookChannel(creds, app=ms).identity()
     if not address:
         raise HTTPException(400, "Microsoft did not return a mailbox address for this account")
     ctx = users.resolve(email)
     s = settings()
     token_enc = crypto.encrypt(s.master_key, ctx.tenant_id, ctx.user_id, json.dumps(creds).encode())
-    with db.user_session(ctx) as conn:
-        account_id = store.upsert_account(conn, "outlook", address, token_enc)
-        store.audit(conn, "user", "account_linked", str(account_id), {"provider": "outlook", "address": address})
-    log.info("linked outlook %s for %s", address, email)
+    # personal: "" = NULL (the EMAILD_MS_TENANT default, as for every account linked before work accounts existed);
+    # work: the authority it was linked with, and the strictest privacy default (local models only)
+    extra = {"ms_tenant": ms.tenant, "privacy_policy": "local_only"} if kind == "work" else {"ms_tenant": ""}
+    try:
+        with db.user_session(ctx) as conn:
+            account_id = store.upsert_account(conn, "outlook", address, token_enc, **extra)
+            store.audit(conn, "user", "account_linked", str(account_id),
+                        {"provider": "outlook", "address": address, "kind": kind})
+    except store.MigrationNeeded as e:
+        raise HTTPException(400, str(e)) from e
+    log.info("linked outlook (%s) %s for %s", kind, address, email)
     return RedirectResponse("/?linked=" + address, status_code=303)

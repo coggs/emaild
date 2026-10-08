@@ -18,6 +18,20 @@
   <span id="filed"></span>
 </div>
 <div id="ts"></div>
+{% if card %}
+<div class="card" id="summary-card">
+  <div class="s muted" style="margin-bottom:4px">Summary · {{ card.date }}</div>
+  {% if card.warning %}<div class="err">⚠ {{ card.warning }}</div>{% endif %}
+  {% if card.summary %}<p style="margin:4px 0">{{ card.summary }}</p>{% endif %}
+  {% set d = card.details %}
+  {% if d.dates %}<div class="s">🗓 {{ d.dates | join(' · ') }}</div>{% endif %}
+  {% if d.amounts %}<div class="s">💲 {{ d.amounts | join(' · ') }}</div>{% endif %}
+  {% if d.links.count %}<div class="s">🔗 {{ d.links.count }} link{{ 's' if d.links.count != 1 }}{% if d.links.domains %} ({{ d.links.domains | join(', ') }}){% endif %}</div>{% endif %}
+  {% if d.attachments %}<div class="s">📎 {{ d.attachments | join(', ') }}</div>{% endif %}
+</div>
+{% endif %}
+<details class="full-email"{% if not card %} open{% endif %}><summary>Full email</summary>
 <pre class="body">{{ item.text }}</pre>
+</details>
 <p class="muted" style="font-size:12px">Opening an original is logged — it's a signal that this kind of email matters to you.</p>
 {% endblock %}

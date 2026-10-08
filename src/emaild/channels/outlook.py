@@ -1,8 +1,15 @@
-"""Outlook.com connector (Microsoft Graph), read-only: delegated `Mail.Read` + `User.Read` + `offline_access`.
+"""Outlook.com and Microsoft 365 connector (Microsoft Graph), read-only: delegated `Mail.Read` + `User.Read` +
+`offline_access`.
 
-OAuth 2.0 authorisation code + PKCE against the Microsoft identity platform (`consumers` authority by default,
-EMAILD_MS_TENANT), implemented directly on httpx - no MSAL. Refresh tokens rotate: every refresh hands the new
-credentials to `on_credentials` straight away so they are persisted even if the rest of the cycle fails.
+OAuth 2.0 authorisation code + PKCE against the Microsoft identity platform, implemented directly on httpx - no MSAL.
+Refresh tokens rotate: every refresh hands the new credentials to `on_credentials` straight away so they are
+persisted even if the rest of the cycle fails.
+
+Authorities: personal accounts (Outlook.com, Hotmail) use EMAILD_MS_TENANT (`consumers` by default); work or school
+accounts (Microsoft 365 / Entra ID) use EMAILD_MS_WORK_TENANT (`organizations` by default, or one tenant's GUID or
+verified domain). The authority an account was linked with is stored on it (`accounts.ms_tenant`, NULL = the personal
+default) and its refreshes go to that same authority: a refresh token is only valid at the authority that issued it.
+Graph itself behaves the same for both kinds (same folders, delta and labels).
 
 Sync model
 ----------
@@ -33,7 +40,8 @@ Label mapping (onto the Gmail label names the rest of emAIl already understands)
     isRead == false              -> UNREAD
     flag.flagStatus == flagged   -> STARRED
     importance == high           -> IMPORTANT
-    inferenceClassification other-> CATEGORY_OTHER
+    inferenceClassification other-> CATEGORY_OTHER  (an organisation may disable Focused Inbox: a missing
+                                                     value is simply no label)
 Focused Inbox's "Other" holds plenty of non-promotional mail (notifications, newsletters you read), so it is *not*
 mapped to CATEGORY_PROMOTIONS; bulk detection keeps relying on List-Unsubscribe/List-Id/Precedence headers, which
 the raw MIME carries exactly as for Gmail.
@@ -50,9 +58,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import quote, urlencode
@@ -80,6 +89,8 @@ EXPIRED_CODES = {"syncStateNotFound", "syncStateInvalid", "resyncRequired"}
 REAUTH_ERRORS = {"invalid_grant", "interaction_required", "consent_required"}
 REAUTH_MESSAGE = "Microsoft sign-in expired — relink the account"
 IMMUTABLE = 'IdType="ImmutableId"'
+PERSONAL_TENANTS = ("consumers",)
+KINDS = ("personal", "work")
 
 
 class TokenError(RuntimeError):
@@ -97,9 +108,31 @@ class MsApp:
         s = settings()
         return cls(s.ms_client_id, s.ms_client_secret, s.ms_tenant or "consumers")
 
+    @classmethod
+    def for_kind(cls, kind: str) -> "MsApp":
+        """'personal' -> EMAILD_MS_TENANT (consumers); 'work' -> EMAILD_MS_WORK_TENANT (organizations)."""
+        if kind not in KINDS:
+            raise ValueError(f"kind must be one of {KINDS}")
+        s = settings()
+        tenant = (s.ms_work_tenant or "organizations") if kind == "work" else (s.ms_tenant or "consumers")
+        return cls(s.ms_client_id, s.ms_client_secret, tenant)
+
+    @classmethod
+    def for_account(cls, ms_tenant: str | None) -> "MsApp":
+        """The authority an account was linked with; NULL (every account linked before migration 016, and personal
+        accounts) means the personal default, EMAILD_MS_TENANT."""
+        app = cls.from_settings()
+        return replace(app, tenant=ms_tenant) if ms_tenant else app
+
     @property
     def authority(self) -> str:
         return f"https://login.microsoftonline.com/{quote(self.tenant, safe='')}/oauth2/v2.0"
+
+
+def account_kind(ms_tenant: str | None) -> str:
+    """'work' for an account linked against an organisational authority, else 'personal'."""
+    t = (ms_tenant or "").strip().lower()
+    return "work" if t and t not in PERSONAL_TENANTS else "personal"
 
 
 # ---------- OAuth (authorisation code + PKCE) ----------
@@ -139,12 +172,66 @@ def token_request(http: httpx.Client, app: MsApp, form: dict, previous: dict | N
     if r.status_code == 200 and body.get("access_token"):
         return _creds_from(body, previous)
     err = str(body.get("error") or f"http_{r.status_code}")
-    if err in REAUTH_ERRORS:
-        raise ReauthRequired(REAUTH_MESSAGE)
     # Microsoft's description starts with an AADSTS code that pinpoints the cause (e.g. AADSTS7000215 = wrong secret).
     # It never contains the secret; we keep only its first sentence.
-    desc = str(body.get("error_description") or "").split("\r")[0].split("\n")[0].split(". ")[0][:200]
-    raise TokenError(f"Microsoft token endpoint refused the request: {err}" + (f" ({desc})" if desc else ""))
+    desc = first_sentence(body.get("error_description"), app.client_secret)
+    if err in REAUTH_ERRORS:
+        e = ReauthRequired(REAUTH_MESSAGE)
+        e.error, e.description = err, desc       # for the link page's guidance (consent, conditional access...)
+        raise e
+    e2 = TokenError(f"Microsoft token endpoint refused the request: {err}" + (f" ({desc})" if desc else ""))
+    e2.error, e2.description = err, desc
+    raise e2
+
+
+def first_sentence(description, secret: str = "") -> str:
+    """The first sentence of an Entra error_description (it starts with the AADSTS code), at most 200 characters,
+    with the client secret blanked out should it ever appear."""
+    d = str(description or "").split("\r")[0].split("\n")[0].split(". ")[0][:200]
+    return d.replace(secret, "***") if secret else d
+
+
+_AADSTS = re.compile(r"AADSTS(\d{5,6})")
+_ERROR_HELP = [
+    (("65001", "90094", "90095", "65004"), "consent",
+     "Your organisation needs to approve emAIl first",
+     "Microsoft 365 asks an administrator to consent before an app can read mail. Ask your IT team to approve "
+     "emAIl's app registration for Mail.Read, User.Read and offline_access (read-only), or to grant admin consent "
+     "in the Entra admin centre. Then link the account again."),
+    (("53000", "53001", "53002", "53003", "53004", "53009", "53010", "53011"), "conditional_access",
+     "Blocked by your organisation's Conditional Access policy",
+     "Your organisation only allows sign-ins from approved devices, apps or locations, and emAIl isn't one of "
+     "them. Only your IT team can change this; some policies also force frequent re-sign-in, so a work account "
+     "may need relinking more often."),
+    (("50020", "700016", "50194", "50011", "700054", "900144"), "account_type",
+     "This app registration doesn't accept this kind of account",
+     "Set the app registration's Supported account types to 'Accounts in any organizational directory and "
+     "personal Microsoft accounts' (see docs/SETUP.md, section 5b), check its redirect URI, and use the matching "
+     "button: personal for Outlook.com/Hotmail, work or school for Microsoft 365."),
+]
+
+
+def explain_error(error: str | None, description: str | None = None) -> dict:
+    """Friendly guidance for an Entra / Microsoft identity error: {"code": "AADSTS65001"|"", "kind", "title",
+    "help", "detail"}. `detail` is the first sentence of Microsoft's description (never a secret)."""
+    detail = first_sentence(description, settings().ms_client_secret)
+    m = _AADSTS.search(detail or "") or _AADSTS.search(str(error or ""))
+    num = m.group(1) if m else ""
+    text = f"{error or ''} {detail}".lower()
+    for codes, kind, title, help_ in _ERROR_HELP:
+        if num in codes or (kind == "consent" and ("admin approval" in text or "consent_required" in text
+                                                    or "admin consent" in text)) \
+                or (kind == "conditional_access" and num.startswith("53")) \
+                or (kind == "account_type" and ("account type" in text or "unauthorized_client" in text
+                                                 and "tenant" in text)):
+            return {"code": f"AADSTS{num}" if num else "", "kind": kind, "title": title, "help": help_,
+                    "detail": detail}
+    if error == "access_denied":
+        return {"code": f"AADSTS{num}" if num else "", "kind": "denied", "title": "Sign-in was cancelled",
+                "help": "Nothing was linked. Start again when you're ready.", "detail": detail}
+    return {"code": f"AADSTS{num}" if num else "", "kind": "other", "title": "Microsoft sign-in failed",
+            "help": "Start the link again; if it keeps failing, the code above tells your IT team (or Microsoft's "
+                    "error lookup) what went wrong.", "detail": detail}
 
 
 def exchange_code(app: MsApp, code: str, verifier: str, redirect_uri: str, http: httpx.Client | None = None) -> dict:
@@ -203,9 +290,12 @@ class OutlookChannel:
 
     def __init__(self, creds: dict, state: dict | None = None, *, app: MsApp | None = None,
                  budget: Budget | None = None, on_credentials: Callable[[dict], None] | None = None,
-                 http: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep):
+                 http: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep,
+                 tenant: str | None = None):
         self._creds = dict(creds)
         self._app = app or MsApp.from_settings()
+        if tenant:          # the account's own authority (work or school accounts); refreshes must go there
+            self._app = replace(self._app, tenant=tenant)
         self.budget = budget or Budget(10**9)
         self._on_credentials = on_credentials
         self._pending_creds: dict | None = None

@@ -42,8 +42,9 @@ def open_channel(ctx: UserCtx, account: dict, conn=None, budget: Budget | None =
         def save(creds: dict) -> None:
             store.update_account(conn, account["id"], token_enc=_encrypt_creds(ctx, creds))
             conn.commit()
+        # tenant: the authority the account was linked with (work/school); None = the personal default
         return OutlookChannel(info, account.get("sync_state"), budget=budget,
-                              on_credentials=save if conn is not None else None)
+                              on_credentials=save if conn is not None else None, tenant=account.get("ms_tenant"))
     raise NotImplementedError(account["provider"])
 
 

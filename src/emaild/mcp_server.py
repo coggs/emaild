@@ -19,7 +19,8 @@ from .search import Filters, search as do_search
 INSTRUCTIONS = """emAIl gives access to the user's email without them reading their inbox.
 Prefer `ask` for questions (newest=true for "latest ..."); use `search` to find specific messages,
 `ask_natural` when you'd rather emAIl work out sender/date/list-vs-answer from the user's own words, `get_thread` to read a conversation,
-and `show_raw` only when the user explicitly wants to see an original email.
+`show_email` to open one email (a summary card with key details, or full=true for its clean text), and `show_raw`
+only when the user explicitly wants the original with all headers.
 Triage runs in shadow mode: emAIl proposes a decision per email (alert / keep / archive) and learns from the
 user's verdicts. Use `pending_decisions` to walk the user through the review queue and `review_decision` to record
 what they say; always pass on their reason, it is the most valuable training signal.
@@ -30,7 +31,8 @@ anything; `rule_suggestions` lists rules emAIl suggests from the user's reviews 
 the user says so.
 Trackers turn order, service-status and ticket-sale emails into boards: `trackers` / `tracker_items` answer "what's
 still in transit?" or "is everything up?"; `create_tracker` -> show the read-back and dry run -> `confirm_tracker`
-once the user agrees. Only ever create trackers from the user's own words.
+once the user agrees. Only ever create trackers from the user's own words. `close_tracker_item` marks an order
+delivered when the user says it arrived.
 Projects group the mail of an involvement (an umbrella such as a club committee) and its goals (sub-projects such as
 "Presentation night"): `list_projects`, `project_status` (where it stands: asks of the user, deadlines, who's waiting
 on whom, with email ids as citations), `project_facts`; `thread_status` for any single thread. `create_project` ->
@@ -123,6 +125,25 @@ def show_raw(item_id: int, include_mime: bool = False) -> dict:
     ctx = _ctx()
     with db.user_session(ctx) as conn:
         return threads.show_raw(conn, ctx, item_id, include_mime) or {"error": "not found"}
+
+
+@mcp.tool()
+def show_email(item_id: int, full: bool = False) -> dict:
+    """Open one email. Default: a summary card - subject, sender, date (local time), what it says, and key details
+    pulled from it without a model (dates/times, amounts, how many links and their domains, attachment names).
+    full=true: the whole email as clean plain text (quoted replies stripped; attachments listed by name only).
+    Spam, suspicious, one-time-code and security-held emails are refused. Every full view is logged."""
+    from . import show
+    with db.user_session(_ctx()) as conn:
+        if not full:
+            return show.card(conn, item_id, router=_r()) or {"error": "not found"}
+        res = show.full(conn, item_id, actor="mcp", max_parts=1, size=show.MCP_CHARS)
+    if res is None:
+        return {"error": "not found"}
+    if res.get("refused"):
+        return {"item_id": item_id, "refused": res["refused"], "error": res["message"]}
+    return {"item_id": res["item_id"], "subject": res["subject"], "from": res["from"], "date": res["date"],
+            "attachments": res["attachments"], "text": "\n".join(res["parts"]), "truncated": res["truncated"]}
 
 
 @mcp.tool()
@@ -491,7 +512,7 @@ def _tracker_out(t: dict) -> dict:
 
 def _item_out(it: dict) -> dict:
     out = {k: it.get(k) for k in ("id", "tracker_id", "tracker", "kind", "item_key", "title", "state", "fields",
-                                  "closed_at", "email_id", "when", "stalled")}
+                                  "closed_at", "closed_reason", "label", "email_id", "when", "stalled")}
     for k in ("last_changed_at", "last_heard_at"):
         out[k] = str(it[k])[:16] if it.get(k) else None
     return out
@@ -573,6 +594,15 @@ def delete_tracker(tracker_id: int) -> dict:
     from . import trackers as tr
     with db.user_session(_ctx()) as conn:
         return {"tracker_id": tracker_id, "deleted": tr.delete(conn, tracker_id, actor="mcp")}
+
+
+@mcp.tool()
+def close_tracker_item(item_id: int, state: str = "delivered") -> dict:
+    """Take one item off a tracker board in a finished state (default: an order the user says was delivered).
+    `item_id` is the tracker item's id (from `trackers` / `tracker_items`), not an email id."""
+    from . import trackers as tr
+    with db.user_session(_ctx()) as conn:
+        return tr.mark_item(conn, item_id, state, actor="mcp")
 
 
 @mcp.tool()

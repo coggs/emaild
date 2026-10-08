@@ -68,6 +68,9 @@ class Settings:
     ms_client_secret: str = field(default_factory=lambda: _secret("EMAILD_MS_CLIENT_SECRET", "/run/emaild/ms_client_secret"),
                                   repr=False)
     ms_tenant: str = field(default_factory=lambda: _env("EMAILD_MS_TENANT", "consumers"))
+    # work or school (Microsoft 365 / Entra ID) accounts: 'organizations' = any directory; a tenant GUID or verified
+    # domain locks linking to that one directory
+    ms_work_tenant: str = field(default_factory=lambda: _env("EMAILD_MS_WORK_TENANT", "organizations"))
 
     # storage
     blob_dir: Path = field(default_factory=lambda: Path(_env("EMAILD_BLOB_DIR", "/data/blobs")))

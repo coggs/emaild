@@ -893,7 +893,8 @@ def test_telegram_project_status_done_and_free_text(bot, monkeypatch):
                         seen.append(ref) or {"kind": "project", "status": st})
     bot.handle_update({"update_id": 5, "message": {"chat": {"id": 77}, "text": "/project presentation night"}})
     text = bot.api.sent[-1][1]
-    assert text.startswith("<b>📁 Presentation night") and "Confirm the &lt;venue&gt; [email 301]" in text
+    # citations are numbered for /show in chat ([email 301] -> [1]); the CLI keeps the raw ids
+    assert text.startswith("<b>📁 Presentation night") and "Confirm the &lt;venue&gt; [1]" in text
     bot.handle_update({"update_id": 6, "message": {"chat": {"id": 77}, "text": "where are we with presentation night?"}})
     assert seen == ["presentation night", "presentation night"]
     monkeypatch.setattr(projects, "route_status", lambda conn, ref, router=None, with_overview=False:

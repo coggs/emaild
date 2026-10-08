@@ -10,7 +10,10 @@
   <td><span class="pill {{ it.tone }}">{{ it.label }}</span>
     {% if it.stalled %}<div><span class="chip alert" title="No update for a while">⚠ {{ it.stalled }}</span></div>{% endif %}</td>
   <td class="s">{{ it.when }}</td>
-  <td class="s">{{ it.changed[:16] if it.changed else '' }}{% if it.closed_at %}<div>closed {{ it.closed_at[:10] }}</div>{% endif %}</td>
+  <td class="s">{{ it.changed[:16] if it.changed else '' }}{% if it.closed_at %}<div>closed {{ it.closed_at[:10] }}</div>{% endif %}
+    {% if it.kind == 'orders' and not it.closed_at and it.id %}<div><button class="btn ghost" style="font-size:12px;padding:2px 8px"
+      hx-post="/trackers/items/{{ it.id }}/delivered" hx-target="#tr{{ it.tracker_id }}" hx-swap="outerHTML"
+      title="It arrived: take it off the board">Mark delivered</button></div>{% endif %}</td>
 </tr>
 {% endmacro %}
 
@@ -40,6 +43,10 @@
     <button class="btn ghost" hx-post="/trackers/{{ t.id }}/off" hx-target="#tr{{ t.id }}" hx-swap="outerHTML">Pause</button>
     {% elif t.status == 'paused' %}
     <button class="btn" hx-post="/trackers/{{ t.id }}/on" hx-target="#tr{{ t.id }}" hx-swap="outerHTML">Resume</button>
+    {% endif %}
+    {% if t.kind == 'orders' and b.open %}
+    <button class="btn ghost" hx-post="/trackers/{{ t.id }}/clear-old" hx-target="#tr{{ t.id }}" hx-swap="outerHTML"
+            title="Close orders with no news for 21+ days (assumed delivered; a later email puts one back)">Clear old</button>
     {% endif %}
     <button class="btn ghost" hx-post="/trackers/{{ t.id }}/test" hx-target="#tt{{ t.id }}" hx-swap="outerHTML"
             title="What this tracker finds in the last 90 days of mail (nothing changes)">Test</button>

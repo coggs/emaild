@@ -1,8 +1,12 @@
 """Telegram bot: morning brief at EMAILD_BRIEF_TIME, alerts, review from your phone, and questions (ask).
 
 Long polling only (no webhook, nothing exposed). Each Telegram chat links to one emAIl user via a one-time code
-from the web app. Telegram is not end-to-end encrypted, so the bot only ever sends summaries (subject, sender,
-one-line summary) at the user's chosen detail level - never full emails.
+from the web app. Telegram is not end-to-end encrypted, so the bot sends summaries (subject, sender, one-line summary)
+at the user's chosen detail level. A whole email is sent only when the user explicitly asks for it (/show N full or
+the 📄 button), never for spam/suspicious/one-time/security-held mail, and never at the minimal detail level.
+
+Every reply that lists emails numbers them [1], [2], ... and remembers the list under its own message id (lists.py),
+so "/show 3", or replying "3" to an older list, opens the right email.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ import httpx
 import oracledb
 
 from . import brief as brief_mod
-from . import db, recommend, triage
+from . import db, lists, recommend, show, triage
 from .config import settings
 from .db import UserCtx
 
@@ -37,6 +41,8 @@ HELP = ("<b>emAIl</b> — your inbox, without the inbox.\n\n"
         "/unprotect Name · /protected · /suggest — manage impersonation protection\n"
         "/refresh — re-check the review list against the latest rules\n"
         "/needs — what needs you · /seen — clear it all (or tap 👁 Seen on an alert)\n"
+        "/show 3 — open email [3] of the last list (a summary card) · /show 3 full — the whole email · "
+        "/thread 3 — where its conversation stands. Or reply to any list with “3”, “full 3” or “thread 3”\n"
         "/unsubs — lists you could unsubscribe from (🧹 one tap, never automatic)\n"
         "/followups — emails you sent that are still waiting on a reply\n"
         "/rule Anything from Riverside Rovers about the canteen roster goes to Needs attention — a rule in plain "
@@ -49,7 +55,8 @@ HELP = ("<b>emAIl</b> — your inbox, without the inbox.\n\n"
         "that only tells you about the changes that matter (read back to you; ✅ Save turns it on)\n"
         "/trackers — your boards · /tracker off 2 · /tracker on 2 · /tracker rm 2 · /tracker show 2 · "
         "/tracker test 2\n"
-        "\"what's still in transit?\" · \"is everything up?\" — answered from your trackers\n"
+        "\"what's still in transit?\" · \"is everything up?\" · \"when is my Acme Shop delivery due?\" — answered "
+        "from your trackers · /tracker 2 clear old — close orders that went quiet\n"
         "/project add Create a project for the NSFC committee, everything from nsfc.example.org — a project in plain "
         "words (read back to you; ✅ Save turns it on). Sub-projects: /project add Add a sub-project under NSFC: "
         "presentation night\n"
@@ -310,17 +317,29 @@ def tracker_proposal_buttons(tracker_id: int) -> dict:
                                  {"text": "✖ Cancel", "callback_data": f"t:n:{tracker_id}"}]]}
 
 
-def render_boards(boards: list[dict], per_board: int = 8) -> tuple[str, dict | None]:
-    """Compact boards: one block per tracker, a line per open item (state dot, title, state, date, stalled)."""
+def render_boards(boards: list[dict], per_board: int = 8, ids_out: list | None = None,
+                  deliver_buttons: bool = False) -> tuple[str, dict | None]:
+    """Compact boards: one block per tracker, a line per open item (state dot, [n] when it has a source email,
+    title, state, date, stalled). `ids_out` collects those emails' ids for lists.remember(); `deliver_buttons` adds
+    a ✅ Delivered button per open order (for /tracker show)."""
     if not boards:
         return ("No trackers yet. Try <code>/track Track my Acme Shop orders</code>", None)
+    ids = ids_out if ids_out is not None else []
     lines, kb = ["<b>Your trackers</b>"], []
     for b in boards[:10]:
         t = b["tracker"]
         lines.append(f"\n{b['icon']} <b>#{t['id']} {html.escape(t.get('name') or '')}</b> · "
                      f"{TRACKER_STATUS.get(t['status'], '')}")
         for it in b["open"][:per_board]:
-            ln = f"{TONE_DOT.get(it['tone'], '⚪')} {html.escape((it.get('title') or '')[:60])} — {html.escape(it['label'])}"
+            num = ""
+            if it.get("email_id"):
+                ids.append(int(it["email_id"]))
+                num = f"{lists.tag(len(ids))} "
+            ln = (f"{TONE_DOT.get(it['tone'], '⚪')} {num}{html.escape((it.get('title') or '')[:60])} — "
+                  f"{html.escape(it['label'])}")
+            if deliver_buttons and t.get("kind") == "orders" and it.get("id") and len(kb) < 8:
+                kb.append([{"text": f"✅ Delivered: {(it.get('title') or '')[:24]}",
+                            "callback_data": f"ti:d:{it['id']}"}])
             if it.get("when"):
                 ln += f" · {html.escape(it['when'])}"
             if it.get("stalled"):
@@ -331,7 +350,9 @@ def render_boards(boards: list[dict], per_board: int = 8) -> tuple[str, dict | N
         if not b["open"] and t["status"] == "active":
             lines.append("<i>nothing on the board yet</i>")
         if b.get("closed"):
-            lines.append(f"<i>{len(b['closed'])} finished</i>")
+            assumed = sum(1 for c in b["closed"] if c.get("closed_reason") == "assumed_delivered")
+            lines.append(f"<i>{len(b['closed'])} finished" + (f" ({assumed} assumed delivered, no confirmation "
+                                                               f"email)" if assumed else "") + "</i>")
         row = []
         if t["status"] == "pending":
             row.append({"text": f"✅ Save #{t['id']}", "callback_data": f"t:y:{t['id']}"})
@@ -404,25 +425,26 @@ def render_query_result(res: dict, item_url=None) -> tuple[str, dict | None]:
     snippets are shown, never bodies; everything is HTML-escaped."""
     from . import query
     interp = f"<i>Interpreted as: {html.escape(res.get('interpreted') or '')}</i>"
+    hint = "\n<i>/show N opens one · /show N full for the whole email</i>"
     if res["mode"] != "list":
         src = "\n".join(f"[{s['n']}] {html.escape((s.get('date') or '')[:10])} · {html.escape(s.get('from') or '')} — "
                         f"{html.escape(s.get('subject') or '')}" for s in res.get("sources", [])[:6])
         body = html.escape(res.get("answer") or "")[:3300] + (f"\n\n<i>{src}</i>" if src else "")
-        return body + "\n\n" + interp, None
+        return body + "\n\n" + interp + (hint if src else ""), None
     items = res.get("items") or []
     if not items:
         return "📭 Nothing matched.\n\n" + interp, None
     lines = [f"📬 <b>{html.escape(query.headline(res))}</b>"]
-    for it in items:
+    for n, it in enumerate(items, 1):
         subj = (it.get("subject") or "(no subject)")[:120]
         summ = (it.get("summary") or "").strip()
-        line = f"• {html.escape(_short_date(it.get('date') or ''))} · {html.escape(subj)}"
+        line = f"{lists.tag(n)} {html.escape(_short_date(it.get('date') or ''))} · {html.escape(subj)}"
         if summ and summ != subj:
             line += f" — {html.escape(summ[:160])}"
         if not (res["query"].get("sender_match") or res["query"].get("sender")):
             line += f" <i>({html.escape((it.get('sender') or '')[:60])})</i>"
         lines.append(line)
-    text = "\n".join(lines)[:3700] + "\n\n" + interp
+    text = "\n".join(lines)[:3700] + "\n\n" + interp + hint
     rows = []
     if item_url:
         for n, it in enumerate(items[:5], 1):
@@ -430,6 +452,37 @@ def render_query_result(res: dict, item_url=None) -> tuple[str, dict | None]:
             if url:
                 rows.append([{"text": f"🔎 Open {n}: {(it.get('subject') or '')[:28]}", "url": url}])
     return text, ({"inline_keyboard": rows} if rows else None)
+
+
+def query_ids(res: dict) -> list[int]:
+    """The item ids behind a query result's numbers: list items in order, or answer sources by their [n]."""
+    if res.get("mode") == "list":
+        return [it["item_id"] for it in res.get("items") or []]
+    return [src["item_id"] for src in sorted(res.get("sources") or [], key=lambda x: x.get("n") or 0)]
+
+
+def show_buttons(item_id: int, item_url: str | None = None, full: bool = True) -> dict:
+    """📄 Full email / 🧵 Thread / 🔎 Open under a card. Callback data stays well under Telegram's 64 bytes."""
+    row = []
+    if full:
+        row.append({"text": "📄 Full email", "callback_data": f"e:f:{int(item_id)}"})
+    row.append({"text": "🧵 Thread", "callback_data": f"e:t:{int(item_id)}"})
+    rows = [row]
+    if item_url:
+        rows.append([{"text": "🔎 Open", "url": item_url}])
+    return {"inline_keyboard": rows}
+
+
+def numbered_lines(lines: list[str], ids: list) -> tuple[list[str], list[int]]:
+    """Prefix the lines that have an email with a running [n] (others get '•'); returns (lines, remembered ids)."""
+    out, keep = [], []
+    for line, iid in zip(lines, list(ids) + [None] * (len(lines) - len(ids))):
+        if iid is None:
+            out.append(f"• {line}")
+        else:
+            keep.append(int(iid))
+            out.append(f"{lists.tag(len(keep))} {line}")
+    return out, keep
 
 
 # ---------- bot ----------
@@ -463,6 +516,24 @@ class Bot:
     def _item_url(self, item_id: int) -> str | None:
         return f"{self.s.public_url}/item/{item_id}" if self.s.public_url.startswith("https://") else None
 
+    def _remember(self, link: dict, msg, item_ids: list) -> None:
+        """Remember a sent list under "<chat>:<message id>" (best effort: never breaks the reply; a no-op before
+        migration 016)."""
+        mid = (msg or {}).get("message_id") if isinstance(msg, dict) else None
+        if not mid or not item_ids:
+            return
+        try:
+            with db.user_session(link["ctx"]) as conn:
+                lists.remember(conn, "telegram", f"{link['chat_id']}:{mid}", item_ids)
+        except Exception as e:                       # a fake/missing DB must not cost the user their answer
+            log.debug("could not remember list: %s", e)
+
+    def _send_list(self, link: dict, text: str, buttons: dict | None, item_ids: list, reply_to: int | None = None):
+        msg = self.api.send(link["chat_id"], text, buttons, reply_to=reply_to) if reply_to else \
+            self.api.send(link["chat_id"], text, buttons)
+        self._remember(link, msg, item_ids)
+        return msg
+
     def _group_for(self, conn, decision_id: int) -> list[int]:
         for g in triage.pending_groups(conn, limit=200):
             if decision_id in g["decision_ids"]:
@@ -473,7 +544,9 @@ class Bot:
     def send_brief(self, link: dict, kind: str) -> None:
         with db.user_session(link["ctx"]) as conn:
             b = brief_mod.generate(conn, link["ctx"], kind=kind, delivered_via="telegram")
-        self.api.send(link["chat_id"], brief_mod.render_telegram(b, link["detail"], self.s.public_url))
+        ids: list[int] = []
+        text = brief_mod.render_telegram(b, link["detail"], self.s.public_url, ids_out=ids)
+        self._send_list(link, text, None, ids)
 
     def send_next_card(self, link: dict, chain: bool = True) -> None:
         with db.user_session(link["ctx"]) as conn:
@@ -502,7 +575,7 @@ class Bot:
         with db.user_session(link["ctx"]) as conn:
             res = query.run(conn, question, Router())
         text, buttons = render_query_result(res, self._item_url)
-        self.api.send(link["chat_id"], text, buttons)
+        self._send_list(link, text, buttons, query_ids(res))
 
     def protect(self, link: dict, arg: str, kind: str) -> None:
         from . import identities
@@ -553,12 +626,14 @@ class Bot:
         if not rows:
             self.api.send(link["chat_id"], "Nobody owes you a reply. 👌")
             return
-        for r in rows:
-            text = f"⏳ <b>{html.escape(r['to'])}</b> · {int(r['days_waiting'])} days"
+        lines, kb = ["<b>⏳ Waiting on a reply</b>"], []
+        for n, r in enumerate(rows, 1):
+            text = f"{lists.tag(n)} <b>{html.escape(r['to'])}</b> · {int(r['days_waiting'])} days"
             if link["detail"] != "minimal":
-                text += f"\n{html.escape(r['subject'])}"
-            self.api.send(link["chat_id"], text,
-                          {"inline_keyboard": [[{"text": "✓ Done", "callback_data": f"f:{r['item_id']}"}]]})
+                text += f"\n    {html.escape(r['subject'])}"
+            lines.append(text)
+            kb.append([{"text": f"✓ Done {lists.tag(n)}", "callback_data": f"f:{r['item_id']}"}])
+        self._send_list(link, "\n".join(lines)[:3900], {"inline_keyboard": kb}, [r["item_id"] for r in rows])
 
     def create_rule(self, link: dict, text: str) -> None:
         from . import rules
@@ -709,8 +784,9 @@ class Bot:
         with db.user_session(link["ctx"]) as conn:
             boards = trackers.boards(conn)
             sugg = trackers.list_suggestions(conn, key=link["ctx"].user_id)
-        text, kb = render_boards(boards)
-        self.api.send(link["chat_id"], text, kb)
+        ids: list[int] = []
+        text, kb = render_boards(boards, ids_out=ids)
+        self._send_list(link, text, kb, ids)
         for sg in sugg[:3]:
             self.api.send(link["chat_id"], render_tracker_suggestion(sg),
                           {"inline_keyboard": [[{"text": "✅ Track", "callback_data": f"ts:y:{sg['id']}"},
@@ -720,6 +796,13 @@ class Bot:
         """/tracker off|on|rm|show|test <ref>; anything else is a new tracker in plain words."""
         from . import trackers
         chat_id = link["chat_id"]
+        m = re.fullmatch(r"(?:clear[ -]old\s+(?P<a>.+?)|(?P<b>.+?)\s+clear[ -]old)(?:\s+(?P<days>\d{1,3})(?:\s*d(?:ays?)?)?)?",
+                         arg.strip(), re.I)
+        if m:
+            return self.clear_old_orders(link, m.group("a") or m.group("b"), int(m.group("days"))
+                                         if m.group("days") else None)
+        if re.fullmatch(r"clear[ -]old", arg.strip(), re.I):          # every orders tracker
+            return self.clear_old_orders(link, None)
         sub, _, rest = arg.strip().partition(" ")
         sub, rest = sub.lower(), rest.strip()
         if sub not in ("off", "on", "rm", "delete", "show", "test", "pause", "resume"):
@@ -756,9 +839,16 @@ class Bot:
                     "Already deleted."
             else:
                 b = trackers.board(conn, tid)
-                text, _ = render_boards([b] if b else [], per_board=20)
+                ids: list[int] = []
+                text, kb = render_boards([b] if b else [], per_board=20, ids_out=ids, deliver_buttons=True)
                 msg = f"{text}\n\n{html.escape(t.get('readback') or '')}\n<i>Your words:</i> " \
                       f"{html.escape(t.get('original_text') or '')}"
+                if t["kind"] == "orders":
+                    msg += f"\n<i>/tracker {tid} clear old — close orders with no news for " \
+                           f"{trackers.CLEAR_OLD_DAYS}+ days</i>"
+                rows = [r for r in (kb or {}).get("inline_keyboard", []) if r[0]["callback_data"].startswith("ti:")]
+                self._send_list(link, msg[:3900], {"inline_keyboard": rows} if rows else None, ids)
+                return
         self.api.send(chat_id, msg[:3900])
 
     def tracker_status(self, link: dict, kind: str, question: str = "") -> None:
@@ -769,18 +859,82 @@ class Bot:
             ans = trackers.status_answer(conn, kind)
         if ans.get("hint") and question:
             return self.answer_question(link, question)
-        text = f"<b>{html.escape(ans['title'])}</b>"
-        text += "".join(f"\n• {html.escape(line)}" for line in ans["lines"])
+        lines, ids = numbered_lines([html.escape(line) for line in ans["lines"]], ans.get("item_ids") or [])
+        text = f"<b>{html.escape(ans['title'])}</b>" + "".join(f"\n{line}" for line in lines)
         if ans.get("hint"):
             text += f"\nTry <code>/track {html.escape(ans['hint'])}</code>"
-        self.api.send(link["chat_id"], text[:3900])
+        self._send_list(link, text[:3900], None, ids)
+
+    def delivery_status(self, link: dict, intent: dict, question: str = "") -> None:
+        """'when is my Acme Shop delivery due?' answered from the open orders (no model call), numbered, with a
+        Mark delivered button per order. No orders tracker, or a named retailer/item with nothing open: the
+        question goes to the normal email search (a past delivery is in the mail, not on the board)."""
+        from . import trackers
+        with db.user_session(link["ctx"]) as conn:
+            ans = trackers.delivery_answer(conn, intent.get("who"), intent.get("when"))
+        if ans is None:
+            return self.answer_question(link, question) if question else \
+                self.api.send(link["chat_id"], "Nothing on the board for that.")
+        lines, ids = numbered_lines([html.escape(i["line"]) for i in ans["items"]],
+                                    [i.get("email_id") for i in ans["items"]])
+        text = f"📦 <b>{html.escape(ans['title'])}</b>" + "".join(f"\n{line}" for line in lines)
+        kb = [[{"text": f"✅ Delivered: {(i['line'].split(':')[0])[:24]}", "callback_data": f"ti:d:{i['tracker_item_id']}"}]
+              for i in ans["items"][:8]]
+        self._send_list(link, text[:3900], {"inline_keyboard": kb} if kb else None, ids)
+
+    def clear_old_orders(self, link: dict, ref: str | None, days: int | None = None) -> None:
+        """'/tracker 3 clear old' or "close the old Acme Shop orders": quiet open orders leave the board as assumed
+        delivered (a later email brings one back)."""
+        from . import store, trackers
+        chat_id = link["chat_id"]
+        with db.user_session(link["ctx"]) as conn:
+            if ref:
+                t = trackers.find_tracker(conn, ref)
+                targets = [t] if t and t["kind"] == "orders" else []
+            else:
+                targets = [t for t in trackers.list_trackers(conn) if t["kind"] == "orders"]
+            if not targets:
+                self.api.send(chat_id, f"No orders tracker matches “{html.escape(ref or '')}” — see /trackers"
+                              if ref else "You're not tracking any orders.")
+                return
+            try:
+                n = sum(trackers.clear_old(conn, t["id"], days or trackers.CLEAR_OLD_DAYS, actor="telegram")
+                        for t in targets)
+            except store.MigrationNeeded as e:
+                self.api.send(chat_id, html.escape(str(e)))
+                return
+        d = days or trackers.CLEAR_OLD_DAYS
+        self.api.send(chat_id, f"🧹 Closed {n} order{'s' if n != 1 else ''} with no news for {d}+ days "
+                               f"(assumed delivered; a new email about one puts it back)." if n else
+                      f"No open orders have been quiet for {d}+ days.")
 
     def tracker_intent(self, link: dict, intent: dict, question: str = "") -> None:
         if intent["op"] == "list":
             return self.send_trackers(link)
         if intent["op"] == "add":
             return self.create_tracker(link, intent["text"])
+        if intent["op"] == "delivery":
+            return self.delivery_status(link, intent, question)
+        if intent["op"] == "clear_old":
+            return self.clear_old_orders(link, intent.get("ref"))
         return self.tracker_status(link, intent["kind"], question)
+
+    def _tracker_item_callback(self, q: dict, link: dict, tiid: int) -> None:
+        """✅ Delivered under a delivery answer: mark that order delivered (VPD: only the user's own items)."""
+        from . import trackers
+        chat_id, msg_id = q["message"]["chat"]["id"], q["message"]["message_id"]
+        with db.user_session(link["ctx"]) as conn:
+            res = trackers.mark_item(conn, tiid, "delivered", actor="telegram")
+        if res.get("error"):
+            self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=res["error"][:190])
+            return
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"],
+                      text=f"✅ {res['title'][:60]} marked delivered")
+        kb = (q["message"].get("reply_markup") or {}).get("inline_keyboard")
+        if kb:
+            rows = [r for r in kb if not any(b.get("callback_data") == f"ti:d:{tiid}" for b in r)]
+            self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
+                          reply_markup={"inline_keyboard": rows})
 
     def _tracker_callback(self, q: dict, link: dict, op: str, tid: int) -> None:
         from . import trackers
@@ -873,7 +1027,8 @@ class Bot:
             return
         lines = (projects.status_lines(res["status"]) if res["kind"] == "project"
                  else projects.thread_lines(res["status"]))
-        self.api.send(link["chat_id"], render_status_text(lines))
+        lines, ids = lists.renumber_citations(lines)          # ' [email 301]' -> ' [1]', openable with /show 1
+        self._send_list(link, render_status_text(lines), None, ids)
 
     def project_command(self, link: dict, arg: str) -> None:
         """/project add <text> · /project done|archive|rm|on <name> · /project <name> (status)."""
@@ -1021,10 +1176,140 @@ class Bot:
         label = "✓ Done" if kind == "f" else {"done": "🧹 Unsubscribed", "dismissed": "📌 Kept",
                                                "manual": "🔗 Link sent", "failed": "✗ Failed"}[res["status"]]
         self.api.call("answerCallbackQuery", callback_query_id=q["id"], text=label)
+        kb = (q["message"].get("reply_markup") or {}).get("inline_keyboard") if kind == "f" else None
+        if kb and len(kb) > 1:      # a follow-ups list: only that row's button goes
+            rows = [[{"text": label, "callback_data": "noop"}] if any(b.get("callback_data") == f"f:{ident}"
+                                                                      for b in r) else r for r in kb]
+        else:
+            rows = [[{"text": label, "callback_data": "noop"}]]
         self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
-                      reply_markup={"inline_keyboard": [[{"text": label, "callback_data": "noop"}]]})
+                      reply_markup={"inline_keyboard": rows})
         if res and res["status"] in ("manual", "failed"):
             self.api.send(chat_id, render_unsub_result(res), reply_to=msg_id)
+
+    # ----- opening emails from lists (/show N, /thread N, replies, 📄 / 🧵 buttons) -----
+    def _pick(self, link: dict, n: int, ref: str | None = None, max_age: float | None = None) -> tuple:
+        """(item_id | None, message | None) for number n of list `ref` (or the latest Telegram list)."""
+        try:
+            with db.user_session(link["ctx"]) as conn:
+                ctx = lists.get(conn, "telegram", ref)
+        except lists.Unavailable as e:
+            return None, html.escape(str(e))
+        if ctx is None or (max_age is not None and ctx["age_minutes"] > max_age):
+            return None, "No recent list to pick from — ask for one first (e.g. /needs or a question)."
+        ids = ctx["item_ids"]
+        if not 1 <= n <= len(ids):
+            return None, f"That list has {len(ids)} email{'s' if len(ids) != 1 else ''} — try 1–{len(ids)}."
+        return ids[n - 1], None
+
+    def open_item(self, link: dict, item_id: int, mode: str, reply_to: int | None = None) -> None:
+        if mode == "full":
+            return self.send_full(link, item_id)
+        if mode == "thread":
+            return self.send_thread(link, item_id)
+        return self.send_card(link, item_id, reply_to)
+
+    def open_numbered(self, link: dict, req: dict, ref: str | None = None, max_age: float | None = None,
+                      quiet: bool = False) -> bool:
+        """Resolve [n] and open it. `quiet`: when there's no usable list, return False (the text is then treated
+        as a normal question) instead of explaining."""
+        item_id, err = self._pick(link, req["n"], ref, max_age)
+        if item_id is None:
+            if quiet:
+                return False
+            self.api.send(link["chat_id"], err)
+            return True
+        self.open_item(link, item_id, req["mode"])
+        return True
+
+    def send_card(self, link: dict, item_id: int, reply_to: int | None = None) -> None:
+        """Summary card: subject, sender, local date, the content summary (regenerated once if weak) and key details
+        pulled from the email without a model. minimal detail: subject and sender only."""
+        from .llm.router import Router
+        with db.user_session(link["ctx"]) as conn:
+            c = show.card(conn, item_id, router=None if link["detail"] == "minimal" else Router())
+        if c is None:
+            self.api.send(link["chat_id"], "That email isn't available.")
+            return
+        if link["detail"] == "minimal":
+            text = f"✉️ <b>{html.escape(c['subject'])}</b>\nfrom {html.escape(c['from'])}\n<i>{html.escape(c['date'])}</i>"
+        else:
+            text = show.render_card(c)
+        self.api.send(link["chat_id"], text, show_buttons(item_id, self._item_url(item_id),
+                                                          full=not c.get("unsafe") and link["detail"] != "minimal"))
+
+    def send_full(self, link: dict, item_id: int) -> None:
+        """The whole email as plain text, at most MAX_PARTS messages; refused at minimal detail and for unsafe mail.
+        Attachments are named, never sent. Audited (show_full)."""
+        chat_id = link["chat_id"]
+        if link["detail"] == "minimal":
+            self.api.send(chat_id, html.escape(show.REFUSALS["minimal"]))
+            return
+        with db.user_session(link["ctx"]) as conn:
+            res = show.full(conn, item_id, actor="telegram")
+        if res is None:
+            self.api.send(chat_id, "That email isn't available.")
+            return
+        if res.get("refused"):
+            self.api.send(chat_id, "🚫 " + html.escape(res["message"]))
+            return
+        head = f"📄 <b>{html.escape(res['subject'][:200])}</b>\nfrom {html.escape(res['from'][:200])} · " \
+               f"{html.escape(res['date'])}"
+        if res["attachments"]:
+            head += "\n📎 " + html.escape(", ".join(res["attachments"]))[:300] + " <i>(not sent here)</i>"
+        parts = [html.escape(p) for p in res["parts"]] or ["<i>(no text)</i>"]
+        n = len(parts)
+        for i, part in enumerate(parts, 1):
+            text = (head + "\n\n" if i == 1 else f"<i>({i}/{n})</i>\n") + part
+            if i == n and res["truncated"]:
+                url = self._item_url(item_id)
+                text += "\n\n<i>… truncated — open on dashboard" + (f": {html.escape(url)}" if url else "") + "</i>"
+            self.api.send(chat_id, text)
+
+    def send_thread(self, link: dict, item_id: int) -> None:
+        from . import projects
+        from .llm.router import Router
+        self.api.call("sendChatAction", chat_id=link["chat_id"], action="typing")
+        with db.user_session(link["ctx"]) as conn:
+            ts = projects.thread_status(conn, item_id=item_id, router=Router())
+        if ts.get("error"):
+            self.api.send(link["chat_id"], html.escape(ts["error"]))
+            return
+        lines, ids = lists.renumber_citations(projects.thread_lines(ts))
+        self._send_list(link, render_status_text(lines), None, ids)
+
+    def show_command(self, link: dict, arg: str, mode: str, reply_to: int | None = None) -> None:
+        """/show N [full] · /show full N · /thread N. Replying with it to a list uses THAT list."""
+        words = arg.lower().split()
+        if "full" in words:
+            mode = "full" if mode == "card" else mode
+            words.remove("full")
+        if len(words) != 1 or not words[0].lstrip("#[").rstrip("]").isdigit():
+            self.api.send(link["chat_id"], "Use: <code>/show 3</code>, <code>/show 3 full</code> or "
+                                           "<code>/thread 3</code> (numbers are from the last list)")
+            return
+        n = int(words[0].lstrip("#[").rstrip("]"))
+        ref = f"{link['chat_id']}:{reply_to}" if reply_to else None
+        if ref:
+            try:
+                with db.user_session(link["ctx"]) as conn:
+                    if lists.get(conn, "telegram", ref) is None:
+                        ref = None                     # replied to something that isn't a list: use the latest
+            except lists.Unavailable:
+                pass
+        self.open_numbered(link, {"n": n, "mode": mode}, ref)
+
+    def _email_callback(self, q: dict, link: dict, op: str, item_id: int) -> None:
+        """📄 Full email / 🧵 Thread. The id comes from the chat, so it is re-checked against the user's own
+        mail (VPD) first."""
+        with db.user_session(link["ctx"]) as conn:
+            ok = show.owned(conn, item_id)
+        if not ok:
+            self.api.call("answerCallbackQuery", callback_query_id=q["id"], text="Not available")
+            return
+        self.api.call("answerCallbackQuery", callback_query_id=q["id"],
+                      text="📄 Sending the email…" if op == "f" else "🧵 Reading the thread…")
+        self.open_item(link, item_id, "full" if op == "f" else "thread")
 
     # ----- update handling -----
     def handle_update(self, u: dict) -> None:
@@ -1055,6 +1340,10 @@ class Bot:
                 triage.set_reason(conn, ids, text)
             self.api.send(chat_id, "📝 Thanks — noted. That reason will guide similar emails.")
             return
+        if reply_to and not text.startswith("/"):
+            req = lists.parse_request(text)
+            if req and self.open_numbered(link, req, f"{chat_id}:{reply_to}", quiet=True):
+                return                                # "3" / "full 3" / "thread 3" in reply to a list
         if cmd in ("/start", "/help"):
             self.api.send(chat_id, HELP)
         elif cmd == "/brief":
@@ -1101,13 +1390,22 @@ class Bot:
         elif cmd == "/needs":
             with db.user_session(link["ctx"]) as conn:
                 ny = brief_mod.needs_you(conn, days=3)
-            def _line(icon: str, r: dict) -> str:
+            rows = [("🔔", r) for r in ny["alerts"]] + [("↩️", r) for r in ny["awaiting_reply"]]
+
+            def _line(n: int, icon: str, r: dict) -> str:
                 summ = (r.get("summary") or "").strip()
                 more = f"\n    {html.escape(summ[:220])}" if summ and summ != r.get("subject") else ""
-                return f"{icon} <b>{html.escape(r['subject'] or '(no subject)')}</b> — {html.escape(r['sender'])}{more}"
-            lines = [_line("🔔", r) for r in ny["alerts"]] + [_line("↩️", r) for r in ny["awaiting_reply"]]
-            self.api.send(chat_id, ("<b>Needs attention</b>\n" + "\n".join(lines) + "\n\n/seen to clear")
-                          if lines else "Nothing needs you. 👌")
+                return (f"{lists.tag(n)} {icon} <b>{html.escape(r['subject'] or '(no subject)')}</b> — "
+                        f"{html.escape(r['sender'])}{more}")
+            lines = [_line(n, icon, r) for n, (icon, r) in enumerate(rows, 1)]
+            if lines:
+                self._send_list(link, ("<b>Needs attention</b>\n" + "\n".join(lines))[:3800] +
+                                "\n\n/show N to open one · /seen to clear", None, [r["item_id"] for _, r in rows])
+            else:
+                self.api.send(chat_id, "Nothing needs you. 👌")
+        elif cmd in ("/show", "/open", "/full", "/thread"):
+            mode = {"/thread": "thread", "/full": "full"}.get(cmd, "card")
+            self.show_command(link, arg, mode, reply_to)
         elif cmd == "/seen":
             with db.user_session(link["ctx"]) as conn:
                 n = brief_mod.dismiss(conn)
@@ -1140,6 +1438,9 @@ class Bot:
             self.api.send(chat_id, HELP)
         else:
             from . import rules, trackers
+            req = lists.parse_request(text)       # "3" / "show 3": only while the latest list is fresh
+            if req and self.open_numbered(link, req, None, max_age=lists.BARE_NUMBER_MINUTES, quiet=True):
+                return
             t_intent = trackers.parse_intent(text)
             if t_intent:
                 return self.tracker_intent(link, t_intent, text)
@@ -1164,6 +1465,12 @@ class Bot:
             self.api.call("editMessageReplyMarkup", chat_id=chat_id, message_id=msg_id,
                           reply_markup={"inline_keyboard": [[{"text": "👁 Seen", "callback_data": "noop"}]]})
             return
+        em = re.fullmatch(r"e:([ft]):(\d+)", q.get("data") or "")
+        if em and link is not None:
+            return self._email_callback(q, link, em.group(1), int(em.group(2)))
+        tid = re.fullmatch(r"ti:d:(\d+)", q.get("data") or "")
+        if tid and link is not None:
+            return self._tracker_item_callback(q, link, int(tid.group(1)))
         reco = re.fullmatch(r"([ukf]):(\d+)", q.get("data") or "")
         if reco and link is not None:
             return self._reco_callback(q, link, reco.group(1), int(reco.group(2)))

@@ -20,38 +20,77 @@ def _utc(d: datetime | None) -> datetime | None:
 
 
 def audit(conn: oracledb.Connection, actor: str, action: str, target: str = "", detail: dict | None = None) -> None:
-    conn.cursor().execute("INSERT INTO audit_log (actor, action, target, detail) VALUES (:1, :2, :3, :4)",
-                          [actor, action, target[:200] or None, json.dumps(detail or {})])
+    conn.cursor().execute("INSERT INTO audit_log (actor, action, target, detail) VALUES (:actor, :action, :target, "
+                          ":detail)", {"actor": actor, "action": action, "target": target[:200] or None,
+                                       "detail": json.dumps(detail or {})})
 
 
 # ---------- accounts ----------
 
-def upsert_account(conn: oracledb.Connection, provider: str, address: str, token_enc: bytes) -> int:
+class MigrationNeeded(RuntimeError):
+    """A feature needs a newer schema ('emaild migrate')."""
+
+
+def _missing_column(e: Exception) -> bool:
+    return "ORA-00904" in str(e)
+
+
+def upsert_account(conn: oracledb.Connection, provider: str, address: str, token_enc: bytes,
+                   ms_tenant: str | None = None, privacy_policy: str | None = None) -> int:
+    """Link (or relink) an account. `ms_tenant` (Outlook): the authority it was linked with - None leaves it as it
+    is (personal accounts keep NULL = the EMAILD_MS_TENANT default), "" clears it, a value sets it (work/school;
+    needs migration 016). `privacy_policy` is applied to a NEW account only, so a relink never loosens or tightens
+    what the user chose."""
     cur = conn.cursor()
     cur.execute("SELECT id FROM accounts WHERE provider = :1 AND address = :2", [provider, address])
     row = cur.fetchone()
     if row:
         cur.execute("UPDATE accounts SET token_enc = :1, status = 'active', last_error = NULL WHERE id = :2",
                     [token_enc, row[0]])
-        return row[0]
-    out = cur.var(oracledb.NUMBER)
-    cur.execute("INSERT INTO accounts (provider, address, token_enc) VALUES (:1, :2, :3) RETURNING id INTO :4",
-                [provider, address, token_enc, out])
-    return int(out.getvalue()[0])
+        account_id = int(row[0])
+    else:
+        out = cur.var(oracledb.NUMBER)
+        if privacy_policy:
+            cur.execute("""INSERT INTO accounts (provider, address, token_enc, privacy_policy)
+                           VALUES (:1, :2, :3, :4) RETURNING id INTO :5""",
+                        [provider, address, token_enc, privacy_policy, out])
+        else:
+            cur.execute("INSERT INTO accounts (provider, address, token_enc) VALUES (:1, :2, :3) RETURNING id INTO :4",
+                        [provider, address, token_enc, out])
+        v = out.getvalue()
+        account_id = int(v[0] if isinstance(v, list) else v)
+    if ms_tenant is not None:
+        try:
+            cur.execute("UPDATE accounts SET ms_tenant = :t WHERE id = :id", {"t": ms_tenant or None, "id": account_id})
+        except oracledb.DatabaseError as e:
+            if not _missing_column(e):
+                raise
+            if ms_tenant:                       # a work account can't be stored correctly without the column
+                raise MigrationNeeded("Linking a work or school account needs a database update: run "
+                                      "'emaild migrate', then link it again.") from e
+    return account_id
+
+
+_ACCOUNT_COLS = "id, provider, address, status, token_enc, sync_cursor, backfill_token, backfill_done, sync_state"
 
 
 def get_account(conn: oracledb.Connection, account_id: int) -> dict | None:
+    """One account. `ms_tenant` is None before migration 016 (every Microsoft account then uses the default)."""
     cur = conn.cursor()
-    cur.execute("""SELECT id, provider, address, status, token_enc, sync_cursor, backfill_token, backfill_done,
-                          sync_state
-                     FROM accounts WHERE id = :1""", [account_id])
+    try:
+        cur.execute(f"SELECT {_ACCOUNT_COLS}, ms_tenant FROM accounts WHERE id = :1", [account_id])
+    except oracledb.DatabaseError as e:
+        if not _missing_column(e):
+            raise
+        cur.execute(f"SELECT {_ACCOUNT_COLS}, NULL FROM accounts WHERE id = :1", [account_id])
     r = cur.fetchone()
     if not r:
         return None
     token = r[4].read() if hasattr(r[4], "read") else r[4]
     state = r[8] if isinstance(r[8], dict) or r[8] is None else json.loads(r[8])
     return dict(id=r[0], provider=r[1], address=r[2], status=r[3], token_enc=token,
-                sync_cursor=r[5], backfill_token=r[6], backfill_done=bool(r[7]), sync_state=state)
+                sync_cursor=r[5], backfill_token=r[6], backfill_done=bool(r[7]), sync_state=state,
+                ms_tenant=r[9] if len(r) > 9 else None)
 
 
 def update_account(conn: oracledb.Connection, account_id: int, **fields) -> None:
@@ -230,12 +269,21 @@ def embed_pending(conn: oracledb.Connection, batch: int) -> int:
 # ---------- status ----------
 
 def status(conn: oracledb.Connection) -> dict:
+    from .channels.outlook import account_kind
     cur = conn.cursor()
-    cur.execute("""SELECT a.id, a.provider, a.address, a.status, a.backfill_done, a.last_sync_at, a.last_error,
-                          (SELECT COUNT(*) FROM items i WHERE i.account_id = a.id)
-                     FROM accounts a ORDER BY a.id""")
+    sql = """SELECT a.id, a.provider, a.address, a.status, a.backfill_done, a.last_sync_at, a.last_error,
+                    (SELECT COUNT(*) FROM items i WHERE i.account_id = a.id), a.privacy_policy, {tenant}
+               FROM accounts a ORDER BY a.id"""
+    try:
+        cur.execute(sql.format(tenant="a.ms_tenant"))
+    except oracledb.DatabaseError as e:              # before migration 016: every account is personal
+        if not _missing_column(e):
+            raise
+        cur.execute(sql.format(tenant="NULL"))
     accounts = [dict(id=r[0], provider=r[1], address=r[2], status=r[3], backfill_done=bool(r[4]),
-                     last_sync_at=str(r[5]) if r[5] else None, last_error=r[6], items=r[7])
+                     last_sync_at=str(r[5]) if r[5] else None, last_error=r[6], items=r[7],
+                     privacy_policy=r[8] if len(r) > 8 else None,
+                     kind=(account_kind(r[9] if len(r) > 9 else None) if r[1] == "outlook" else None))
                 for r in cur]
     model = active_model(conn)
     # VECTOR columns can't be aggregated (ORA-22849); model_id is set together with the embedding.
